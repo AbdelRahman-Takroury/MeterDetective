@@ -1,0 +1,23 @@
+{
+    "currency": "JOD",
+    "type": "Residential_Block",
+    "version": "2026-v1",
+    "brackets": [
+        {
+            "min_kwh": 0,
+            "max_kwh": 300,
+            "rate_per_kwh": 0.05
+        },
+        {
+            "min_kwh": 301,
+            "max_kwh": 600,
+            "rate_per_kwh": 0.1
+        },
+        {
+            "min_kwh": 601,
+            "max_kwh": 999999,
+            "rate_per_kwh": 0.2
+        }
+    ],
+    "fixed_charges": 1.5
+}
