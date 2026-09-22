@@ -15,5 +15,5 @@ data/raw/*
 !data/raw/.gitkeep
 data/processed/*
 !data/processed/.gitkeep
+data/evaluation/rebuilt_developer_a*/
 MeterDetective_AI_Project_Plan (1).md
-
