@@ -17,6 +17,8 @@ services:
 
   api:
     build: .
+    volumes:
+      - ./data/processed:/app/data/processed:ro
     env_file:
       - path: .env
         required: false
@@ -35,4 +37,3 @@ services:
 
 volumes:
   postgres_data:
-

@@ -1,0 +1,136 @@
+{
+  "format_version": 1,
+  "tables": {
+    "assets": [
+      {
+        "id": "10000000-0000-4000-8000-000000000001",
+        "asset_type": "substation",
+        "name": "Demo substation",
+        "metadata_json": {"synthetic": true}
+      },
+      {
+        "id": "10000000-0000-4000-8000-000000000002",
+        "parent_id": "10000000-0000-4000-8000-000000000001",
+        "asset_type": "feeder",
+        "name": "Demo feeder",
+        "metadata_json": {"synthetic": true}
+      },
+      {
+        "id": "10000000-0000-4000-8000-000000000003",
+        "parent_id": "10000000-0000-4000-8000-000000000002",
+        "asset_type": "transformer",
+        "name": "Demo transformer",
+        "capacity": 100.0,
+        "metadata_json": {"synthetic": true}
+      }
+    ],
+    "meters": [
+      {
+        "id": "MD-001",
+        "transformer_id": "10000000-0000-4000-8000-000000000003",
+        "location": "Amman demo zone",
+        "type": "residential",
+        "status": "active",
+        "customer_segment": "residential",
+        "has_solar": false,
+        "has_ev": false,
+        "metadata_source": "synthetic_seed",
+        "metadata_json": {"synthetic": true}
+      },
+      {
+        "id": "MD-002",
+        "transformer_id": "10000000-0000-4000-8000-000000000003",
+        "location": "Amman demo zone",
+        "type": "residential",
+        "status": "active",
+        "customer_segment": "residential",
+        "has_solar": true,
+        "has_ev": false,
+        "metadata_source": "synthetic_seed",
+        "metadata_json": {"synthetic": true}
+      },
+      {
+        "id": "MD-003",
+        "transformer_id": "10000000-0000-4000-8000-000000000003",
+        "location": "Amman demo zone",
+        "type": "residential",
+        "status": "active",
+        "customer_segment": "residential",
+        "has_solar": false,
+        "has_ev": true,
+        "metadata_source": "synthetic_seed",
+        "metadata_json": {"synthetic": true}
+      }
+    ],
+    "readings": [
+      {"meter_id": "MD-001", "timestamp": "2026-09-21T08:00:00Z", "kwh": 1.2, "source": "synthetic_seed"},
+      {"meter_id": "MD-002", "timestamp": "2026-09-21T08:00:00Z", "kwh": 0.8, "source": "synthetic_seed"},
+      {"meter_id": "MD-003", "timestamp": "2026-09-21T08:00:00Z", "kwh": 1.5, "source": "synthetic_seed"},
+      {"meter_id": "MD-001", "timestamp": "2026-09-21T08:30:00Z", "kwh": 0.36, "source": "synthetic_seed"},
+      {"meter_id": "MD-002", "timestamp": "2026-09-21T08:30:00Z", "kwh": 0.82, "source": "synthetic_seed"},
+      {"meter_id": "MD-003", "timestamp": "2026-09-21T08:30:00Z", "kwh": 1.45, "source": "synthetic_seed"}
+    ],
+    "transformer_readings": [
+      {"transformer_id": "10000000-0000-4000-8000-000000000003", "timestamp": "2026-09-21T08:00:00Z", "input_kwh": 3.68},
+      {"transformer_id": "10000000-0000-4000-8000-000000000003", "timestamp": "2026-09-21T08:30:00Z", "input_kwh": 2.76}
+    ],
+    "events": [
+      {
+        "id": "20000000-0000-4000-8000-000000000001",
+        "idempotency_key": "synthetic-seed:MD-001:2026-09-21T08:30:00Z:drop",
+        "event_type": "anomaly.detected",
+        "payload_json": {
+          "event_id": "20000000-0000-4000-8000-000000000001",
+          "event_type": "anomaly.detected",
+          "occurred_at": "2026-09-21T08:30:00Z",
+          "meter_ids": ["MD-001"],
+          "source": "synthetic_seed",
+          "schema_version": "1.0",
+          "data": {"scenario": "local_drop", "synthetic": true}
+        },
+        "status": "processed"
+      }
+    ],
+    "anomalies": [
+      {
+        "event_id": "20000000-0000-4000-8000-000000000001",
+        "meter_id": "MD-001",
+        "type": "consumption_drop",
+        "severity": 0.7,
+        "reliability_score": 0.95,
+        "features_json": {"drop_fraction": 0.7, "synthetic": true},
+        "detected_at": "2026-09-21T08:30:00Z"
+      }
+    ],
+    "cases": [
+      {
+        "id": "30000000-0000-4000-8000-000000000001",
+        "title": "Synthetic MD-001 consumption drop",
+        "status": "closed",
+        "triage_score": 61.0,
+        "priority_band": "P2",
+        "confidence": 0.82,
+        "opened_at": "2026-09-21T09:00:00Z",
+        "updated_at": "2026-09-21T10:00:00Z"
+      }
+    ],
+    "case_meters": [
+      {
+        "case_id": "30000000-0000-4000-8000-000000000001",
+        "meter_id": "MD-001",
+        "relationship": "primary"
+      }
+    ],
+    "tariffs": [
+      {
+        "name": "Synthetic residential demo",
+        "customer_segment": "residential",
+        "currency": "JOD",
+        "jod_per_kwh": "0.100000",
+        "effective_from": "2026-01-01T00:00:00Z",
+        "source": "synthetic_seed",
+        "is_synthetic": true
+      }
+    ]
+  }
+}

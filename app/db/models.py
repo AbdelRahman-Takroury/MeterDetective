@@ -1,15 +1,18 @@
 from datetime import datetime
+from decimal import Decimal
 from typing import Any
 from uuid import UUID, uuid4
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     JSON,
+    CheckConstraint,
     DateTime,
     Float,
     ForeignKey,
     Index,
     Integer,
+    Numeric,
     String,
     Text,
     UniqueConstraint,
@@ -35,6 +38,9 @@ class Asset(IdMixin, Base):
     name: Mapped[str] = mapped_column(String(120))
     capacity: Mapped[float | None] = mapped_column(Float)
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    __table_args__ = (
+        CheckConstraint("capacity IS NULL OR capacity >= 0", name="asset_capacity_nonnegative"),
+    )
 
 
 class Meter(Base):
@@ -58,7 +64,10 @@ class Reading(IdMixin, Base):
     kwh: Mapped[float] = mapped_column(Float)
     quality_flag: Mapped[str] = mapped_column(String(40), default="valid")
     source: Mapped[str] = mapped_column(String(80))
-    __table_args__ = (UniqueConstraint("meter_id", "timestamp", name="uq_reading_meter_time"),)
+    __table_args__ = (
+        UniqueConstraint("meter_id", "timestamp", name="uq_reading_meter_time"),
+        Index("ix_readings_meter_timestamp", "meter_id", "timestamp"),
+    )
 
 
 class TransformerReading(Base):
@@ -66,13 +75,22 @@ class TransformerReading(Base):
     transformer_id: Mapped[UUID] = mapped_column(ForeignKey("assets.id"), primary_key=True)
     timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), primary_key=True)
     input_kwh: Mapped[float] = mapped_column(Float)
+    __table_args__ = (
+        Index("ix_transformer_readings_transformer_timestamp", "transformer_id", "timestamp"),
+        Index("ix_transformer_readings_timestamp", "timestamp"),
+    )
 
 
 class Event(IdMixin, TimestampMixin, Base):
     __tablename__ = "events"
+    idempotency_key: Mapped[str] = mapped_column(String(160), nullable=False)
     event_type: Mapped[str] = mapped_column(String(80), index=True)
     payload_json: Mapped[dict[str, Any]] = mapped_column(JSON)
     status: Mapped[str] = mapped_column(String(30), index=True)
+    __table_args__ = (
+        UniqueConstraint("idempotency_key", name="uq_event_idempotency_key"),
+        Index("ix_events_created_at", "created_at"),
+    )
 
 
 class Anomaly(IdMixin, Base):
@@ -84,6 +102,13 @@ class Anomaly(IdMixin, Base):
     reliability_score: Mapped[float] = mapped_column(Float)
     features_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     detected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    __table_args__ = (
+        CheckConstraint(
+            "reliability_score >= 0 AND reliability_score <= 1",
+            name="anomaly_reliability_range",
+        ),
+        UniqueConstraint("event_id", "meter_id", "type", name="uq_anomaly_event_meter_type"),
+    )
 
 
 class Case(IdMixin, Base):
@@ -96,7 +121,27 @@ class Case(IdMixin, Base):
     confidence: Mapped[float | None] = mapped_column(Float)
     assigned_to: Mapped[str | None] = mapped_column(String(120))
     opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+    __table_args__ = (
+        CheckConstraint(
+            "triage_score IS NULL OR (triage_score >= 0 AND triage_score <= 100)",
+            name="case_triage_score_range",
+        ),
+        CheckConstraint(
+            "confidence IS NULL OR (confidence >= 0 AND confidence <= 1)",
+            name="case_confidence_range",
+        ),
+        CheckConstraint(
+            "active_rank IS NULL OR active_rank >= 1", name="case_active_rank_positive"
+        ),
+        CheckConstraint(
+            "priority_band IS NULL OR priority_band IN ('P1', 'P2', 'P3', 'P4')",
+            name="case_priority_band_values",
+        ),
+        Index("ix_cases_status_priority", "status", "priority_band"),
+    )
 
 
 class CaseMeter(Base):
@@ -113,6 +158,11 @@ class Evidence(IdMixin, TimestampMixin, Base):
     source: Mapped[str] = mapped_column(String(120))
     value_json: Mapped[dict[str, Any]] = mapped_column(JSON)
     reliability: Mapped[float] = mapped_column(Float)
+    __table_args__ = (
+        CheckConstraint(
+            "reliability >= 0 AND reliability <= 1", name="evidence_reliability_range"
+        ),
+    )
 
 
 class Hypothesis(IdMixin, Base):
@@ -122,6 +172,11 @@ class Hypothesis(IdMixin, Base):
     confidence: Mapped[float] = mapped_column(Float)
     support_json: Mapped[list[Any]] = mapped_column(JSON, default=list)
     contradiction_json: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    __table_args__ = (
+        CheckConstraint(
+            "confidence >= 0 AND confidence <= 1", name="hypothesis_confidence_range"
+        ),
+    )
 
 
 class Recommendation(IdMixin, Base):
@@ -206,7 +261,14 @@ class InvestigationReport(IdMixin, Base):
         DateTime(timezone=True), server_default=func.now()
     )
     superseded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    __table_args__ = (UniqueConstraint("case_id", "version", name="uq_report_case_version"),)
+    __table_args__ = (
+        UniqueConstraint("case_id", "version", name="uq_report_case_version"),
+        CheckConstraint("version >= 1", name="report_version_positive"),
+        CheckConstraint(
+            "completeness >= 0 AND completeness <= 1", name="report_completeness_range"
+        ),
+        Index("ix_investigation_reports_case_generated", "case_id", "generated_at"),
+    )
 
 
 class Tariff(IdMixin, Base):
@@ -214,11 +276,27 @@ class Tariff(IdMixin, Base):
     name: Mapped[str] = mapped_column(String(120))
     customer_segment: Mapped[str] = mapped_column(String(60), index=True)
     currency: Mapped[str] = mapped_column(String(3), default="JOD")
-    jod_per_kwh: Mapped[float] = mapped_column(Float)
+    jod_per_kwh: Mapped[Decimal] = mapped_column(Numeric(12, 6))
     effective_from: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     effective_to: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     source: Mapped[str] = mapped_column(Text)
     is_synthetic: Mapped[bool] = mapped_column(default=True)
+    __table_args__ = (
+        UniqueConstraint(
+            "name", "customer_segment", "effective_from", name="uq_tariff_identity"
+        ),
+        CheckConstraint("jod_per_kwh >= 0", name="tariff_rate_nonnegative"),
+        CheckConstraint(
+            "effective_to IS NULL OR effective_to > effective_from",
+            name="tariff_effective_window",
+        ),
+        Index(
+            "ix_tariffs_segment_effective_window",
+            "customer_segment",
+            "effective_from",
+            "effective_to",
+        ),
+    )
 
 
 class FinancialImpact(IdMixin, Base):
@@ -228,12 +306,28 @@ class FinancialImpact(IdMixin, Base):
     missing_kwh_low: Mapped[float] = mapped_column(Float)
     missing_kwh_base: Mapped[float] = mapped_column(Float)
     missing_kwh_high: Mapped[float] = mapped_column(Float)
-    risk_jod_low: Mapped[float] = mapped_column(Float)
-    risk_jod_base: Mapped[float] = mapped_column(Float)
-    risk_jod_high: Mapped[float] = mapped_column(Float)
+    risk_jod_low: Mapped[Decimal] = mapped_column(Numeric(16, 3))
+    risk_jod_base: Mapped[Decimal] = mapped_column(Numeric(16, 3))
+    risk_jod_high: Mapped[Decimal] = mapped_column(Numeric(16, 3))
     tariff_id: Mapped[UUID] = mapped_column(ForeignKey("tariffs.id"))
     assumptions_json: Mapped[list[Any]] = mapped_column(JSON)
     confidence: Mapped[float] = mapped_column(Float)
+    __table_args__ = (
+        UniqueConstraint("report_id", name="uq_financial_impact_report"),
+        CheckConstraint(
+            "missing_kwh_low >= 0 AND missing_kwh_low <= missing_kwh_base "
+            "AND missing_kwh_base <= missing_kwh_high",
+            name="financial_missing_kwh_order",
+        ),
+        CheckConstraint(
+            "risk_jod_low >= 0 AND risk_jod_low <= risk_jod_base "
+            "AND risk_jod_base <= risk_jod_high",
+            name="financial_risk_jod_order",
+        ),
+        CheckConstraint(
+            "confidence >= 0 AND confidence <= 1", name="financial_confidence_range"
+        ),
+    )
 
 
 class TriageAssessment(IdMixin, Base):
@@ -250,11 +344,23 @@ class TriageAssessment(IdMixin, Base):
     calculated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
+    __table_args__ = (
+        UniqueConstraint("report_id", name="uq_triage_assessment_report"),
+        CheckConstraint("score >= 0 AND score <= 100", name="triage_score_range"),
+        CheckConstraint("active_rank >= 1", name="triage_active_rank_positive"),
+        CheckConstraint("active_count >= 1", name="triage_active_count_positive"),
+        CheckConstraint("active_rank <= active_count", name="triage_rank_within_count"),
+        CheckConstraint("band IN ('P1', 'P2', 'P3', 'P4')", name="triage_band_values"),
+        CheckConstraint(
+            "percentile >= 0 AND percentile <= 100", name="triage_percentile_range"
+        ),
+        Index("ix_triage_assessments_rank", "band", "active_rank"),
+    )
 
 
-Index("ix_readings_meter_timestamp", Reading.meter_id, Reading.timestamp)
 Index(
-    "ix_transformer_readings_time",
-    TransformerReading.transformer_id,
-    TransformerReading.timestamp,
+    "ix_document_chunks_embedding_hnsw",
+    DocumentChunk.embedding,
+    postgresql_using="hnsw",
+    postgresql_ops={"embedding": "vector_cosine_ops"},
 )
