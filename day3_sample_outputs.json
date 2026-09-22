@@ -1,0 +1,79 @@
+{
+    "tool3_quality_output": {
+        "status": "valid",
+        "quality_score": 100.0,
+        "metrics": {
+            "total_readings": 5,
+            "missing_values": 0,
+            "negative_values": 0,
+            "zero_values": 0,
+            "flatline_values": 0
+        }
+    },
+    "tool4_baseline_output": {
+        "status": "success",
+        "method": "time-of-day/day-of-week robust grouping",
+        "baseline_profiles_count": 5,
+        "profiles": {
+            "day_1_hour_0": {
+                "median": 10.0,
+                "q1": 10.0,
+                "q3": 10.0,
+                "iqr": 0.0
+            },
+            "day_1_hour_1": {
+                "median": 10.2,
+                "q1": 10.2,
+                "q3": 10.2,
+                "iqr": 0.0
+            },
+            "day_1_hour_2": {
+                "median": 9.8,
+                "q1": 9.8,
+                "q3": 9.8,
+                "iqr": 0.0
+            },
+            "day_1_hour_3": {
+                "median": 10.1,
+                "q1": 10.1,
+                "q3": 10.1,
+                "iqr": 0.0
+            },
+            "day_1_hour_4": {
+                "median": 10.0,
+                "q1": 10.0,
+                "q3": 10.0,
+                "iqr": 0.0
+            }
+        }
+    },
+    "tool5_anomaly_output": {
+        "status": "anomalies_detected",
+        "total_anomalies": 2,
+        "overall_severity_score": 69.39,
+        "detected_events": [
+            {
+                "timestamp": "2012-06-05 02:00:00",
+                "type": "drop",
+                "reading_value": 3.0,
+                "expected_median": 9.8,
+                "severity_score": 69.39,
+                "severity_components": {
+                    "deviation_pct": 69.39,
+                    "limit": 9.8
+                }
+            },
+            {
+                "timestamp": "2012-06-05 03:00:00",
+                "type": "drop",
+                "reading_value": 3.1,
+                "expected_median": 10.1,
+                "severity_score": 69.31,
+                "severity_components": {
+                    "deviation_pct": 69.31,
+                    "limit": 10.1
+                }
+            }
+        ]
+    }
+}
