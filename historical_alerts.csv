@@ -1,16 +1,21 @@
-Ticket_ID,Equipment_ID,Issue_Type,Date_Opened,Status
-TKT_1000,TX_6,Voltage Drop,2012-10-07,Closed
-TKT_1001,TX_6,Overheating,2012-10-14,Closed
-TKT_1002,TX_1,Overheating,2012-10-21,Closed
-TKT_1003,TX_5,Voltage Drop,2012-10-28,Closed
-TKT_1004,TX_5,Tampering_Suspected,2012-11-04,Closed
-TKT_1005,TX_1,Overheating,2012-11-11,Closed
-TKT_1006,TX_5,Communication Loss,2012-11-18,Closed
-TKT_1007,TX_5,Overheating,2012-11-25,Closed
-TKT_1008,TX_6,Voltage Drop,2012-12-02,Closed
-TKT_1009,TX_5,Voltage Drop,2012-12-09,Closed
-TKT_1010,TX_3,Voltage Drop,2012-12-16,Closed
-TKT_1011,TX_4,Tampering_Suspected,2012-12-23,Closed
-TKT_1012,TX_2,Overheating,2012-12-30,Closed
-TKT_1013,TX_3,Tampering_Suspected,2013-01-06,Closed
-TKT_1014,TX_5,Tampering_Suspected,2013-01-13,Closed
+Ticket_ID,Equipment_ID,Issue_Type,Date_Opened,Status,Outcome,Data_Source
+TKT_1000,TX_5,Overheating,2011-12-04,Closed,Monitored,synthetic_fixture
+TKT_1001,TX_4,Meter_Malfunction,2011-12-11,Closed,Resolved,synthetic_fixture
+TKT_1002,TX_6,Transformer_Mismatch,2011-12-18,Closed,Resolved,synthetic_fixture
+TKT_1003,TX_3,Overheating,2011-12-25,Closed,Monitored,synthetic_fixture
+TKT_1004,TX_4,Voltage_Drop,2012-01-01,Closed,Resolved,synthetic_fixture
+TKT_1005,TX_5,Voltage_Drop,2012-01-08,Closed,Maintenance_Completed,synthetic_fixture
+TKT_1006,TX_2,Overheating,2012-01-15,Closed,Resolved,synthetic_fixture
+TKT_1007,TX_4,Voltage_Drop,2012-01-22,Closed,Monitored,synthetic_fixture
+TKT_1008,TX_2,Overheating,2012-01-29,Closed,Monitored,synthetic_fixture
+TKT_1009,TX_6,Transformer_Mismatch,2012-02-05,Closed,Monitored,synthetic_fixture
+TKT_1010,TX_3,Transformer_Mismatch,2012-02-12,Closed,Resolved,synthetic_fixture
+TKT_1011,TX_1,Overheating,2012-02-19,Closed,Monitored,synthetic_fixture
+TKT_1012,TX_3,Transformer_Mismatch,2012-02-26,Closed,Monitored,synthetic_fixture
+TKT_1013,TX_4,Transformer_Mismatch,2012-03-04,Closed,Resolved,synthetic_fixture
+TKT_1014,TX_2,Transformer_Mismatch,2012-03-11,Closed,Maintenance_Completed,synthetic_fixture
+TKT_1015,TX_2,Communication_Loss,2012-03-18,Closed,Resolved,synthetic_fixture
+TKT_1016,TX_5,Meter_Malfunction,2012-03-25,Closed,Monitored,synthetic_fixture
+TKT_1017,TX_2,Voltage_Drop,2012-04-01,Closed,Monitored,synthetic_fixture
+TKT_1018,TX_5,Communication_Loss,2012-04-08,Closed,Resolved,synthetic_fixture
+TKT_1019,TX_6,Transformer_Mismatch,2012-04-15,Closed,Maintenance_Completed,synthetic_fixture

@@ -1,2 +1,11 @@
-Target_ID,Anomaly_Date,Anomaly_Type
-TX_3,2013-01-15,Shared-Drop
+Scenario_ID,Timestamp,Target_ID,Anomaly_Type,Scope,Expected_Effect
+SCN_001,2012-06-05 10:30:00,MAC004202,Local-Drop,Local,70% consumption drop for one meter
+SCN_002,2012-06-06 10:30:00,MAC004203_Copy4,Communication-Gap,Local,6-hour missing-reading window
+SCN_003,2012-06-07 10:30:00,MAC004215_Copy4,Flatline,Local,Repeated identical readings
+SCN_004,2012-06-08 10:30:00,TX_1,Shared-Drop,Shared,40% drop across meters under one transformer
+SCN_005,2012-06-09 10:30:00,TX_2,Transformer-Mismatch,Upstream,Transformer input differs from downstream total
+SCN_006,2012-06-10 10:30:00,MAC004187_Copy3,Weather-Explained-Spike,Local,50% load increase explained by synthetic weather context
+SCN_007,2012-06-11 18:00:00,MAC004214_Copy4,EV-Signature,Local,Evening load increase consistent with EV scenario
+SCN_008,2012-06-12 12:00:00,MAC004204_Copy1,Solar-Net-Load-Drop,Local,Midday net-load reduction consistent with solar PV
+SCN_009,2012-06-13 10:30:00,MAC004204_Copy1,Customer-Behavior-Change,Local,Temporary internally consistent load schedule change
+SCN_010,2012-06-14 22:30:00,MAC004210,Post-Action-Recurrence,Local,Condition returns after simulated action window

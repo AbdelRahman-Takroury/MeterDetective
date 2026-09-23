@@ -2,6 +2,7 @@
     "currency": "JOD",
     "type": "Residential_Block",
     "version": "2026-v1",
+    "source_type": "synthetic_demo_fixture",
     "brackets": [
         {
             "min_kwh": 0,

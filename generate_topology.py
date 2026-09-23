@@ -1,37 +1,180 @@
 import pandas as pd
 import numpy as np
-print("=== Starting Topology Generation ===")
-df=pd.read_csv('seed_data.csv')
-meters = df['LCLid'].unique().tolist()
-print(f"Total meters found: {len(meters)}")
-transformers = ['TX_1', 'TX_2', 'TX_3', 'TX_4', 'TX_5', 'TX_6']
-#every fedeer links with 2 transformers 
-feeders_map={
-    'TX_1':'Feeder_1','TX_2':'Feeder_1',
-    'TX_3':'Feeder_2','TX_4':'Feeder_2',
-    'TX_5':'Feeder_3','TX_6':'Feeder_3',
+
+
+# ============================================================
+# إعدادات
+# ============================================================
+
+INPUT_FILE = "seed_data.csv"
+OUTPUT_FILE = "topology.csv"
+
+RANDOM_SEED = 42
+
+SUBSTATION_ID = "Sub_Main_1"
+
+TRANSFORMERS = [
+    "TX_1",
+    "TX_2",
+    "TX_3",
+    "TX_4",
+    "TX_5",
+    "TX_6"
+]
+
+FEEDER_MAP = {
+    "TX_1": "Feeder_1",
+    "TX_2": "Feeder_1",
+
+    "TX_3": "Feeder_2",
+    "TX_4": "Feeder_2",
+
+    "TX_5": "Feeder_3",
+    "TX_6": "Feeder_3"
 }
-# 1. خلط العدادات عشوائياً عشان نكسر ترتيب النسخ
-np.random.shuffle(meters)
 
-# 2حساب عدد التكرارات المطلوبة لكل محول
-repeats = (len(meters) // len(transformers)) + 1 
 
-# 3. توزيع العدادات على شكل "بلوكات" 
-assigned_tx = np.repeat(transformers, repeats)[:len(meters)]
-# 5. بناء جدول الشبكة
-topology_df = pd.DataFrame({
-    'Meter_ID': meters,
-    'Transformer_ID': assigned_tx
-})
+# ============================================================
+# 1. قراءة الـ seed data
+# ============================================================
 
-# 6. ربط المحولات بال feedeers  باستخدام القاموس
-topology_df['Feeder_ID'] = topology_df['Transformer_ID'].map(feeders_map)
-#Substation (محطة التحويل): المركز الرئيسي اللي بيغذي كل منطقتنا
-topology_df['Substation_ID'] = 'Sub_Main_1'
-# 7. حفظت الملف 
-topology_df.to_csv('topology.csv', index=False)
+print("=== Starting Topology Generation ===")
 
-print("\n=== Topology Created Successfully ===")
-print(topology_df.head(15)) # طبعنا 15 سطر عشان تشوف البلوكات كيف ترتبت
-print(f"\nTopology saved to topology.csv with {len(topology_df)} meters.")
+df = pd.read_csv(INPUT_FILE)
+
+meters = (
+    df["LCLid"]
+    .dropna()
+    .unique()
+    .tolist()
+)
+
+print(
+    f"Meters found: {len(meters)}"
+)
+
+
+# ============================================================
+# 2. تثبيت العشوائية
+# ============================================================
+
+rng = np.random.default_rng(
+    RANDOM_SEED
+)
+
+# نخلط العدادات حتى لا يكون توزيعها
+# مرتبطاً بترتيب البيانات الأصلي
+rng.shuffle(meters)
+
+
+# ============================================================
+# 3. توزيع العدادات على المحولات
+# ============================================================
+
+meter_count = len(meters)
+transformer_count = len(TRANSFORMERS)
+
+# نوزع العدادات بالتساوي قدر الإمكان
+transformer_assignments = np.resize(
+    TRANSFORMERS,
+    meter_count
+)
+
+
+# ============================================================
+# 4. إنشاء topology records
+# ============================================================
+
+topology_rows = []
+
+for meter_id, transformer_id in zip(
+    meters,
+    transformer_assignments
+):
+
+    feeder_id = FEEDER_MAP[
+        transformer_id
+    ]
+
+    topology_rows.append({
+        "Meter_ID": meter_id,
+        "Transformer_ID": transformer_id,
+        "Feeder_ID": feeder_id,
+        "Substation_ID": SUBSTATION_ID
+    })
+
+
+topology_df = pd.DataFrame(
+    topology_rows
+)
+
+
+# ============================================================
+# 5. التحقق من topology
+# ============================================================
+
+print("\n=== Topology Validation ===")
+
+print(
+    f"Total meters: "
+    f"{topology_df['Meter_ID'].nunique()}"
+)
+
+print(
+    f"Total transformers: "
+    f"{topology_df['Transformer_ID'].nunique()}"
+)
+
+print(
+    f"Total feeders: "
+    f"{topology_df['Feeder_ID'].nunique()}"
+)
+
+
+# عدد العدادات لكل Transformer
+meters_per_transformer = (
+    topology_df
+    .groupby("Transformer_ID")
+    .size()
+)
+
+print("\nMeters per transformer:")
+print(
+    meters_per_transformer
+)
+
+
+# ============================================================
+# 6. التأكد من عدم وجود Meter مكرر
+# ============================================================
+
+duplicate_meters = (
+    topology_df["Meter_ID"]
+    .duplicated()
+    .sum()
+)
+
+if duplicate_meters > 0:
+    raise ValueError(
+        "Duplicate meters found in topology."
+    )
+
+
+# ============================================================
+# 7. حفظ topology
+# ============================================================
+
+topology_df.to_csv(
+    OUTPUT_FILE,
+    index=False
+)
+
+print(
+    f"\nTopology saved successfully: "
+    f"{OUTPUT_FILE}"
+)
+
+print("\nSample:")
+print(
+    topology_df.head(15)
+)

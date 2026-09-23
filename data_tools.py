@@ -159,8 +159,12 @@ def detect_anomaly(readings_df: pd.DataFrame, baseline_profiles: dict, datetime_
             
         else:
             # استخدام IQR لتحديد الحدود max min (Rule-based)
-            lower_bound = q1 - (1.5 * iqr)
-            upper_bound = q3 + (1.5 * iqr)
+            # تعديل الحماية 4: إضافة هامش تسامح بسيط للـ IQR لمنع فخ الإيجابيات الكاذبة (False Positives)
+            # إذا كان IQR صفراً (الاستهلاك ثابت جداً)، أي تغير طفيف جداً سيعتبر شذوذاً بالغلط
+            safe_iqr = max(iqr, 0.1) 
+            
+            lower_bound = q1 - (1.5 * safe_iqr)
+            upper_bound = q3 + (1.5 * safe_iqr)
             
             # 4. اكتشاف  (Drops)
             if val < lower_bound:

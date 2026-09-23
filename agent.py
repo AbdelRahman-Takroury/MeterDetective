@@ -1,10 +1,15 @@
 import os
 import json
 import pandas as pd
-from groq import Groq
+# تم استبدال Groq بمكتبة openai لربطها بـ Ollama محلياً
+from openai import OpenAI
 
-# 1. إعداد الاتصال
-os.environ["GROQ_API_KEY"] = "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"  
+# 1. إعداد الاتصال (Ollama Local Setup)
+# ربط الكود بسيرفر Ollama المحلي (بدون إنترنت وبدون API Key حقيقي)
+client = OpenAI(
+    base_url="http://localhost:11434/v1", 
+    api_key="ollama-local" 
+)
 
 # 2. الأدوات
 def get_transformer_data(transformer_id: str, **kwargs) -> str:
@@ -19,7 +24,7 @@ def get_transformer_data(transformer_id: str, **kwargs) -> str:
     tx_data['Day'] = tx_data['DateTime'].astype(str).str[:10]
     daily = tx_data.groupby('Day').mean(numeric_only=True).reset_index()
     
-    # 🎯 خدعة الهاكاثون: حقن هبوط بنسبة 70% في يوم 2012-06-05 لضمان اكتشافه
+    #  خدعة الهاكاثون: حقن هبوط بنسبة 70% في يوم 2012-06-05 لضمان اكتشافه
     if '2012-06-05' in daily['Day'].values:
         numeric_cols = daily.select_dtypes(include='number').columns
         daily.loc[daily['Day'] == '2012-06-05', numeric_cols] *= 0.30
@@ -68,11 +73,17 @@ tools = [
     }
 ]
 
-# 3. بناء هيكلية المحادثة (الـ Prompt)
 messages = [
     {
         "role": "system",
-        "content": "You are 'MeterDetective', an elite AI data engineer analyzing Jordan's electricity grid. Analyze the provided daily consumption data for the requested transformer, pinpoint the exact date of the massive sudden drop, estimate the financial loss in JOD using the tariff data, and correlate it with historical alerts. Write a highly professional final investigation report in English."
+        "content": (
+            "You are 'MeterDetective', a Smart Grid AI Agent analyzing Jordan's electricity grid. "
+            "Analyze the provided daily consumption data for the requested transformer, pinpoint the exact date "
+            "of the massive sudden drop, estimate the financial loss in JOD using the tariff data, and correlate it "
+            "with historical alerts. Write a highly professional final investigation report in English. "
+            "IMPORTANT: Always sign the report exactly as 'Prepared by: MeterDetective (Smart Grid AI Agent)'. "
+            "The current date is 2026-09-23. Always use this exact date at the end of the report."
+        )
     },
     {
         "role": "user",
@@ -80,12 +91,13 @@ messages = [
     }
 ]
 
-print("=== 🕵️‍♂️ MeterDetective is investigating (Powered by Raw Groq API) ===")
+print("=== 🕵️‍♂️ MeterDetective is investigating (Powered by Local Ollama) ===")
 
 try:
     while True:
         response = client.chat.completions.create(
-            model="openai/gpt-oss-120b",
+            # استخدام موديل Qwen الذي قمت بتحميله
+            model="qwen", 
             messages=messages,
             tools=tools,
             tool_choice="auto",
