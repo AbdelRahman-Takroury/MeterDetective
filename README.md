@@ -19,6 +19,10 @@ List routes accept `offset` and `limit`; cases may be filtered by `status`. Read
 windows use timezone-aware timestamps with an inclusive `start` and exclusive `end`.
 Unknown meters return 404, invalid query values return 422, and database failures return
 sanitized 503/500 errors. These routes are read-only; creating investigations remains future work.
+Each HTTP response also has an `X-Request-ID` header. A safe caller-supplied ID is echoed;
+otherwise the API generates a UUID. Request completion and failures are logged as JSON with the
+ID, method, path, status, and duration. Query strings, request bodies, and driver error text are
+not logged. Uvicorn access logs are disabled to avoid duplicate plaintext request lines.
 
 ## Repeatable seed/import
 
