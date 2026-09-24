@@ -13,6 +13,13 @@ docker compose up --build
 Open `http://localhost:8000/api/health` or the interactive API documentation at
 `http://localhost:8000/docs`. The API container applies migrations before it starts.
 
+The first read APIs are `GET /api/meters`, `GET /api/meters/{meter_id}`,
+`GET /api/meters/{meter_id}/readings?start=...&end=...`, and `GET /api/cases`.
+List routes accept `offset` and `limit`; cases may be filtered by `status`. Reading
+windows use timezone-aware timestamps with an inclusive `start` and exclusive `end`.
+Unknown meters return 404, invalid query values return 422, and database failures return
+sanitized 503/500 errors. These routes are read-only; creating investigations remains future work.
+
 ## Repeatable seed/import
 
 For a quick database smoke test, rebuild the API after pulling these changes and import the
