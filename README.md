@@ -107,3 +107,16 @@ service name `db`. Copy `.env.example` to `.env` and change only that host.
 
 See [docs/architecture.md](docs/architecture.md) and [docs/contracts.md](docs/contracts.md)
 for the frozen Day 1 contracts.
+### Day 5-B external evidence
+
+Ingest the curated, source-attributed technical summaries into PostgreSQL/pgvector:
+
+```powershell
+uv run python -m app.ingest_knowledge
+```
+
+Tool 12 uses Open-Meteo with a timeout, one retry, and an in-process TTL cache. Tool 14
+retrieves stored chunks with citations containing document, source URL, license, section, and
+relevance metadata. The default embedding backend is deterministic and local so the demo remains
+reproducible. Configure an OpenAI-compatible narrative provider with `LLM_PROVIDER`,
+`LLM_BASE_URL`, `LLM_API_KEY`, and `LLM_MODEL`; numerical conclusions remain tool-owned.

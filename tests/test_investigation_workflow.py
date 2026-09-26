@@ -1,5 +1,6 @@
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from uuid import uuid4
 
 import pytest
@@ -13,8 +14,9 @@ from app.db.base import Base
 from app.db.repositories import HypothesisRepository
 from app.db.session import get_db
 from app.main import app
-from app.services.investigation import InvestigationService, ReplayCommand
+from app.services.investigation import InvestigationService, ReplayCommand, build_registry
 from app.tools.database import PrecedentInput, find_meter_precedents
+from app.tools.weather import WeatherClient
 
 
 @pytest.fixture
@@ -102,16 +104,29 @@ def seed_scenario(session: Session, *, shared: bool = False) -> datetime:
 
 def test_replay_creates_one_inspectable_case_and_is_idempotent(session: Session) -> None:
     event_time = seed_scenario(session)
-    service = InvestigationService(session)
+
+    def unavailable_weather(url: str, timeout: float):
+        raise TimeoutError
+
+    service = InvestigationService(
+        session,
+        build_registry(
+            weather_client=WeatherClient(
+                base_url="https://weather.invalid",
+                retry_count=1,
+                transport=unavailable_weather,
+            )
+        ),
+    )
     first = service.replay(ReplayCommand(meter_id="M1", event_time=event_time))
     session.commit()
 
     assert first.status == "case_created"
     assert first.case_id is not None
     assert first.report_id is not None
-    assert first.tool_calls == 11
+    assert first.tool_calls == 18
     assert session.scalar(select(func.count()).select_from(models.AgentRun)) == 1
-    assert session.scalar(select(func.count()).select_from(models.ToolExecution)) == 11
+    assert session.scalar(select(func.count()).select_from(models.ToolExecution)) == 18
     assert session.scalar(select(func.count()).select_from(models.Case)) == 1
 
     report = session.get(models.InvestigationReport, first.report_id)
@@ -120,6 +135,16 @@ def test_replay_creates_one_inspectable_case_and_is_idempotent(session: Session)
     assert {item["question_id"] for item in report.answers_json} == set(range(1, 19))
     assert report.answers_json[14]["status"] == "pending_verification"
     assert all(item["status"] for item in report.answers_json)
+    answers = {item["question_id"]: item for item in report.answers_json}
+    assert answers[6]["status"] == "unknown"
+    assert answers[12]["limitations"] == [
+        "No relevant stored technical document was retrieved."
+    ]
+    assert answers[16]["status"] == "unknown"
+    assert "tariff" in answers[16]["limitations"][0].lower()
+    assert answers[18]["status"] == "answered"
+    assert any("Revenue was unavailable" in item for item in answers[18]["limitations"])
+    assert session.scalar(select(func.count()).select_from(models.FinancialImpact)) == 0
 
     hypotheses = list(
         session.scalars(
@@ -139,6 +164,106 @@ def test_replay_creates_one_inspectable_case_and_is_idempotent(session: Session)
     assert second.duplicate is True
     assert second.case_id == first.case_id
     assert session.scalar(select(func.count()).select_from(models.Case)) == 1
+
+
+def test_active_queue_change_versions_triage_and_financial_history(session: Session) -> None:
+    event_time = seed_scenario(session)
+    session.add(
+        models.Tariff(
+            name="Synthetic residential test tariff",
+            customer_segment="residential",
+            currency="JOD",
+            jod_per_kwh=Decimal("0.120000"),
+            effective_from=event_time - timedelta(days=1),
+            source="fixture:day5-j",
+            is_synthetic=True,
+        )
+    )
+    session.commit()
+
+    first = InvestigationService(session).replay(
+        ReplayCommand(meter_id="M1", event_time=event_time)
+    )
+    session.commit()
+    first_report = session.get(models.InvestigationReport, first.report_id)
+    assert first_report is not None
+    first_q16 = next(item for item in first_report.answers_json if item["question_id"] == 16)
+    assert first_q16["status"] == "answered"
+    assert session.scalar(
+        select(func.count()).select_from(models.FinancialImpact).where(
+            models.FinancialImpact.case_id == first.case_id
+        )
+    ) == 1
+
+    second_time = event_time + timedelta(minutes=30)
+    session.add_all(
+        [
+            models.Reading(
+                meter_id="M1",
+                timestamp=second_time,
+                kwh=10,
+                quality_flag="valid",
+                source="synthetic-test",
+            ),
+            models.Reading(
+                meter_id="M2",
+                timestamp=second_time,
+                kwh=2,
+                quality_flag="valid",
+                source="synthetic-test",
+            ),
+            models.Reading(
+                meter_id="M3",
+                timestamp=second_time,
+                kwh=10.8,
+                quality_flag="valid",
+                source="synthetic-test",
+            ),
+        ]
+    )
+    session.commit()
+    second = InvestigationService(session).replay(
+        ReplayCommand(meter_id="M2", event_time=second_time)
+    )
+    session.commit()
+
+    assert second.status == "case_created"
+    versions = list(
+        session.scalars(
+            select(models.InvestigationReport)
+            .where(models.InvestigationReport.case_id == first.case_id)
+            .order_by(models.InvestigationReport.version)
+        )
+    )
+    assert [item.version for item in versions] == [1, 2]
+    old_triage = session.scalar(
+        select(models.TriageAssessment).where(
+            models.TriageAssessment.report_id == versions[0].id
+        )
+    )
+    new_triage = session.scalar(
+        select(models.TriageAssessment).where(
+            models.TriageAssessment.report_id == versions[1].id
+        )
+    )
+    assert old_triage is not None and new_triage is not None
+    assert old_triage.active_count == 1
+    assert new_triage.active_count == 2
+    assert new_triage.policy_version == old_triage.policy_version
+    updated_q18 = next(item for item in versions[1].answers_json if item["question_id"] == 18)
+    assert updated_q18["structured_values"]["active_count"] == 2
+    assert updated_q18["fresh_as_of"] != versions[0].answers_json[17]["fresh_as_of"]
+    assert session.scalar(
+        select(func.count()).select_from(models.FinancialImpact).where(
+            models.FinancialImpact.case_id == first.case_id
+        )
+    ) == 2
+    assert session.scalar(
+        select(func.count()).select_from(models.CaseEvent).where(
+            models.CaseEvent.case_id == first.case_id,
+            models.CaseEvent.event_type == "triage_recalculated",
+        )
+    ) == 1
 
 
 def test_shared_evidence_changes_leading_hypothesis(session: Session) -> None:
@@ -275,7 +400,7 @@ def test_replay_case_detail_and_trace_are_exposed_through_api() -> None:
             )
             assert replay.status_code == 200, replay.text
             replay_body = replay.json()
-            assert replay_body["tool_calls"] == 11
+            assert replay_body["tool_calls"] == 18
             case_id = replay_body["case_id"]
 
             detail = client.get(f"/api/cases/{case_id}")
@@ -287,7 +412,7 @@ def test_replay_case_detail_and_trace_are_exposed_through_api() -> None:
             trace = client.get(f"/api/cases/{case_id}/trace")
             assert trace.status_code == 200
             tools = trace.json()["runs"][0]["tools"]
-            assert len(tools) == 11
+            assert len(tools) == 18
             assert all(tool["status"] == "succeeded" for tool in tools)
     finally:
         app.dependency_overrides.clear()

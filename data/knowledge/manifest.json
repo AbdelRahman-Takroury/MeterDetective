@@ -1,0 +1,25 @@
+{
+  "documents": [
+    {
+      "file": "nistir-7628-summary.md",
+      "title": "NISTIR 7628 Rev. 1 — Smart Grid Cybersecurity Guidelines (curated summary)",
+      "source_url": "https://csrc.nist.gov/pubs/ir/7628/r1/final",
+      "publisher": "National Institute of Standards and Technology",
+      "license": "MeterDetective-authored summary of a U.S. Government publication"
+    },
+    {
+      "file": "doe-ami-summary.md",
+      "title": "DOE Advanced Metering Infrastructure and Customer Systems (curated summary)",
+      "source_url": "https://www.energy.gov/oe/articles/advanced-metering-infrastructure-and-customer-systems",
+      "publisher": "U.S. Department of Energy",
+      "license": "MeterDetective-authored summary of a U.S. Government publication"
+    },
+    {
+      "file": "open-meteo-summary.md",
+      "title": "Open-Meteo Historical Weather API (curated integration notes)",
+      "source_url": "https://open-meteo.com/en/docs/historical-weather-api",
+      "publisher": "Open-Meteo",
+      "license": "MeterDetective-authored summary; source data attribution required by provider"
+    }
+  ]
+}
