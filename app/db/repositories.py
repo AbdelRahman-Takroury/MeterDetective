@@ -218,6 +218,16 @@ class ReportRepository:
     def add_version(
         self, *, case_id: UUID, status: str, answers: list[Any], completeness: float
     ) -> models.InvestigationReport:
+        from app.services.report_validation import (
+            is_contract_report_status,
+            validate_report_for_persistence,
+        )
+
+        if is_contract_report_status(status):
+            validated = validate_report_for_persistence(
+                case_id=case_id, status=status, answers=answers
+            )
+            completeness = validated.completeness
         parent = self.session.scalar(
             select(models.Case).where(models.Case.id == case_id).with_for_update()
         )
@@ -314,9 +324,7 @@ class HypothesisRepository:
             dict.fromkeys([*hypothesis.support_json, *(str(item) for item in support)])
         )
         hypothesis.contradiction_json = list(
-            dict.fromkeys(
-                [*hypothesis.contradiction_json, *(str(item) for item in contradiction)]
-            )
+            dict.fromkeys([*hypothesis.contradiction_json, *(str(item) for item in contradiction)])
         )
         history = list(hypothesis.update_history_json)
         now = datetime.now(UTC)
@@ -347,6 +355,7 @@ class HypothesisRepository:
         )
         self.session.flush()
         return hypothesis
+
 
 class TariffRepository:
     def __init__(self, session: Session) -> None:

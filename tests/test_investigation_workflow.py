@@ -109,9 +109,9 @@ def test_replay_creates_one_inspectable_case_and_is_idempotent(session: Session)
     assert first.status == "case_created"
     assert first.case_id is not None
     assert first.report_id is not None
-    assert first.tool_calls == 11
+    assert first.tool_calls == 13
     assert session.scalar(select(func.count()).select_from(models.AgentRun)) == 1
-    assert session.scalar(select(func.count()).select_from(models.ToolExecution)) == 11
+    assert session.scalar(select(func.count()).select_from(models.ToolExecution)) == 13
     assert session.scalar(select(func.count()).select_from(models.Case)) == 1
 
     report = session.get(models.InvestigationReport, first.report_id)
@@ -275,7 +275,7 @@ def test_replay_case_detail_and_trace_are_exposed_through_api() -> None:
             )
             assert replay.status_code == 200, replay.text
             replay_body = replay.json()
-            assert replay_body["tool_calls"] == 11
+            assert replay_body["tool_calls"] == 13
             case_id = replay_body["case_id"]
 
             detail = client.get(f"/api/cases/{case_id}")
@@ -287,7 +287,7 @@ def test_replay_case_detail_and_trace_are_exposed_through_api() -> None:
             trace = client.get(f"/api/cases/{case_id}/trace")
             assert trace.status_code == 200
             tools = trace.json()["runs"][0]["tools"]
-            assert len(tools) == 11
+            assert len(tools) == 13
             assert all(tool["status"] == "succeeded" for tool in tools)
     finally:
         app.dependency_overrides.clear()

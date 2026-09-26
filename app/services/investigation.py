@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from app.contracts.common import EvidenceReference, RunStatus
 from app.contracts.report import AnswerStatus, InvestigationAnswer
 from app.contracts.tool import ToolInput, ToolOutput
+from app.core.config import get_settings
 from app.db import models
 from app.db.repositories import EventRepository, ReadingRepository, ReportRepository
 from app.tools.analytics import (
@@ -53,7 +54,17 @@ from app.tools.database import (
     get_meter_profile,
     get_reading_window,
 )
+from app.tools.knowledge import (
+    KnowledgeSearchInput,
+    KnowledgeSearchOutput,
+    KnowledgeSearchTool,
+)
 from app.tools.registry import ToolRegistry
+from app.tools.weather import (
+    WeatherClient,
+    WeatherContextInput,
+    WeatherContextOutput,
+)
 
 
 class InvestigationFailure(RuntimeError):
@@ -108,6 +119,10 @@ class RecordInvestigationInput(ToolInput):
     incident_type: str
     precedent_case_ids: list[UUID]
     precedent_summary: str
+    weather_status: str = "unavailable"
+    weather_summary: dict[str, Any] = Field(default_factory=dict)
+    knowledge_status: str = "no_results"
+    knowledge_citations: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class RecordInvestigationOutput(ToolOutput):
@@ -167,9 +182,7 @@ def record_investigation(
     )
     session.add(case)
     session.flush()
-    session.add(
-        models.CaseMeter(case_id=case.id, meter_id=data.meter_id, relationship="affected")
-    )
+    session.add(models.CaseMeter(case_id=case.id, meter_id=data.meter_id, relationship="affected"))
     session.add(
         models.Anomaly(
             meter_id=data.meter_id,
@@ -259,6 +272,8 @@ def record_investigation(
     quality_refs = refs("quality")
     peer_refs = refs("peers", "shared")
     precedent_refs = refs("precedents")
+    weather_refs = refs("weather")
+    knowledge_refs = refs("knowledge")
     leading = max(hypotheses, key=lambda item: item.confidence)
     answers = [
         _answer(
@@ -332,9 +347,37 @@ def record_investigation(
                     limitations=["No qualified peer group was available."],
                 )
             )
+    if data.weather_status == "answered" and weather_refs:
+        answers.append(
+            _answer(
+                6,
+                status=AnswerStatus.ANSWERED,
+                answer=(
+                    "Weather observations were retrieved for the event window; causal "
+                    "interpretation remains limited to deterministic residual analysis."
+                ),
+                confidence=0.75,
+                evidence=weather_refs,
+                tools=["get_weather_context"],
+                values=data.weather_summary,
+                limitations=["Weather context alone cannot establish the cause of a load change."],
+                fresh_as_of=data.detected_at,
+            )
+        )
+    else:
+        answers.append(
+            _answer(
+                6,
+                status=AnswerStatus.UNKNOWN,
+                answer="Weather evidence is unavailable; no weather explanation was inferred.",
+                confidence=0,
+                tools=["get_weather_context"],
+                limitations=["The external weather source failed or returned no observations."],
+                fresh_as_of=data.detected_at,
+            )
+        )
     for question_id, limitation in (
-        (6, "Weather integration is scheduled for Day 5."),
-        (7, "Customer-behavior evidence is scheduled for Day 5."),
+        (7, "Customer-behavior evidence is scheduled for Day 5-A."),
         (8, "DER-context analysis is scheduled for Day 5."),
         (9, "Transformer energy-balance tool 11 is scheduled for Day 5."),
     ):
@@ -350,6 +393,9 @@ def record_investigation(
     hypothesis_refs = (
         refs(*data.hypothesis_drafts[0].support_keys) if data.hypothesis_drafts else []
     )
+    synthesis_refs = hypothesis_refs or anomaly_refs
+    if data.knowledge_status == "answered":
+        synthesis_refs = [*synthesis_refs, *knowledge_refs]
     answers.extend(
         [
             _answer(
@@ -357,8 +403,12 @@ def record_investigation(
                 status=AnswerStatus.ANSWERED,
                 answer=f"The leading hypothesis is {leading.label}.",
                 confidence=leading.confidence,
-                evidence=hypothesis_refs or anomaly_refs,
-                tools=["detect_shared_incident", "create_case_and_record_investigation"],
+                evidence=synthesis_refs,
+                tools=[
+                    "detect_shared_incident",
+                    "search_technical_knowledge",
+                    "create_case_and_record_investigation",
+                ],
                 values={"hypothesis": leading.label},
                 fresh_as_of=data.detected_at,
             ),
@@ -367,7 +417,7 @@ def record_investigation(
                 status=AnswerStatus.ANSWERED,
                 answer=f"Leading-hypothesis confidence is {leading.confidence:.2f}.",
                 confidence=leading.confidence,
-                evidence=hypothesis_refs or anomaly_refs,
+                evidence=synthesis_refs,
                 tools=["create_case_and_record_investigation"],
                 values={"confidence": leading.confidence},
                 fresh_as_of=data.detected_at,
@@ -377,8 +427,14 @@ def record_investigation(
                 status=AnswerStatus.ANSWERED,
                 answer="Supporting and contradicting evidence are attached to each hypothesis.",
                 confidence=leading.confidence,
-                evidence=hypothesis_refs or anomaly_refs,
-                tools=["create_case_and_record_investigation"],
+                evidence=synthesis_refs,
+                tools=["search_technical_knowledge", "create_case_and_record_investigation"],
+                values={"citation_count": len(data.knowledge_citations)},
+                limitations=(
+                    []
+                    if data.knowledge_status == "answered"
+                    else ["No relevant stored technical document was retrieved."]
+                ),
                 fresh_as_of=data.detected_at,
             ),
         ]
@@ -476,7 +532,19 @@ def record_investigation(
     )
 
 
-def build_registry() -> ToolRegistry:
+def build_registry(
+    *,
+    weather_client: WeatherClient | None = None,
+    knowledge_tool: KnowledgeSearchTool | None = None,
+) -> ToolRegistry:
+    settings = get_settings()
+    weather_client = weather_client or WeatherClient(
+        base_url=settings.weather_base_url,
+        timeout_seconds=settings.weather_timeout_seconds,
+        retry_count=settings.weather_retry_count,
+        cache_ttl_seconds=settings.weather_cache_ttl_seconds,
+    )
+    knowledge_tool = knowledge_tool or KnowledgeSearchTool()
     registry = ToolRegistry()
     registry.register("get_meter_profile", get_meter_profile)
     registry.register("get_reading_window", get_reading_window)
@@ -488,6 +556,8 @@ def build_registry() -> ToolRegistry:
     registry.register("get_connected_assets", lambda data, _: get_connected_assets(data))
     registry.register("detect_shared_incident", lambda data, _: detect_shared_incident(data))
     registry.register("find_meter_precedents", find_meter_precedents)
+    registry.register("get_weather_context", lambda data, _: weather_client.get(data))
+    registry.register("search_technical_knowledge", knowledge_tool)
     registry.register("create_case_and_record_investigation", record_investigation)
     return registry
 
@@ -558,9 +628,7 @@ class InvestigationService:
             end = event_time + timedelta(minutes=30)
             window = self._required(
                 "get_reading_window",
-                ReadingWindowInput(
-                    run_id=run.id, meter_id=command.meter_id, start=start, end=end
-                ),
+                ReadingWindowInput(run_id=run.id, meter_id=command.meter_id, start=start, end=end),
                 ReadingWindowOutput,
             )
             quality = self._required(
@@ -653,8 +721,35 @@ class InvestigationService:
                 PrecedentInput(run_id=run.id, meter_id=command.meter_id),
                 PrecedentOutput,
             )
+            settings = get_settings()
+            weather = self._required(
+                "get_weather_context",
+                WeatherContextInput(
+                    run_id=run.id,
+                    latitude=settings.demo_latitude,
+                    longitude=settings.demo_longitude,
+                    start=event_time - timedelta(hours=6),
+                    end=event_time + timedelta(hours=6),
+                ),
+                WeatherContextOutput,
+            )
+            knowledge = self._required(
+                "search_technical_knowledge",
+                KnowledgeSearchInput(
+                    run_id=run.id,
+                    query=f"smart meter {selected_event.anomaly_type} {shared.incident_type}",
+                ),
+                KnowledgeSearchOutput,
+            )
             evidence_drafts = self._evidence_drafts(
-                event_time, quality, selected_event, comparison, shared, precedents
+                event_time,
+                quality,
+                selected_event,
+                comparison,
+                shared,
+                precedents,
+                weather,
+                knowledge,
             )
             hypotheses = self._hypotheses(quality, shared)
             precedent_ids = [item.case_id for item in precedents.exact_meter_cases]
@@ -676,6 +771,16 @@ class InvestigationService:
                     incident_type=shared.incident_type,
                     precedent_case_ids=precedent_ids,
                     precedent_summary=precedents.pattern_summary,
+                    weather_status=weather.status,
+                    weather_summary={
+                        "temperature_c_min": weather.temperature_c_min,
+                        "temperature_c_max": weather.temperature_c_max,
+                        "temperature_c_mean": weather.temperature_c_mean,
+                    },
+                    knowledge_status=knowledge.status,
+                    knowledge_citations=[
+                        item.model_dump(mode="json") for item in knowledge.citations
+                    ],
                 ),
                 RecordInvestigationOutput,
             )
@@ -687,7 +792,7 @@ class InvestigationService:
                 "case_id": str(recorded.case_id),
                 "report_id": str(recorded.report_id),
                 "incident_type": shared.incident_type,
-                "completed_tools": 11,
+                "completed_tools": 13,
             }
             event.status = "completed"
             self.session.flush()
@@ -698,7 +803,7 @@ class InvestigationService:
                 report_id=recorded.report_id,
                 status="case_created",
                 anomaly_count=len(anomaly.events),
-                tool_calls=11,
+                tool_calls=13,
             )
         except Exception as exc:
             run.status = "failed"
@@ -776,6 +881,8 @@ class InvestigationService:
         comparison: PeerComparisonOutput,
         shared: SharedIncidentOutput,
         precedents: PrecedentOutput,
+        weather: WeatherContextOutput,
+        knowledge: KnowledgeSearchOutput,
     ) -> list[EvidenceDraft]:
         return [
             EvidenceDraft(
@@ -818,12 +925,26 @@ class InvestigationService:
                 reliability=1,
                 observed_at=event_time,
             ),
+            EvidenceDraft(
+                key="weather",
+                kind="weather_context",
+                source="open-meteo",
+                value=weather.model_dump(mode="json", exclude={"evidence"}),
+                reliability=weather.confidence,
+                observed_at=event_time,
+            ),
+            EvidenceDraft(
+                key="knowledge",
+                kind="technical_knowledge",
+                source="database.document_chunks",
+                value=knowledge.model_dump(mode="json", exclude={"evidence"}),
+                reliability=0.85 if knowledge.status == "answered" else 0,
+                observed_at=event_time,
+            ),
         ]
 
     @staticmethod
-    def _hypotheses(
-        quality: QualityOutput, shared: SharedIncidentOutput
-    ) -> list[HypothesisDraft]:
+    def _hypotheses(quality: QualityOutput, shared: SharedIncidentOutput) -> list[HypothesisDraft]:
         data_failure = HypothesisDraft(
             label="communication_or_data_quality_failure",
             confidence=0.65 if not quality.reliable else 0.1,
