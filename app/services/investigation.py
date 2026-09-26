@@ -27,12 +27,15 @@ from app.db.repositories import (
     TariffRepository,
 )
 from app.tools.advanced import (
+    AnalyticsEvidenceOutput,
     CustomerDerInput,
     CustomerDerOutput,
     EnergyBalanceInput,
     EnergyBalanceOutput,
     ForecastInput,
     ForecastOutput,
+    HybridSeverityInput,
+    IsolationInput,
     QueueCase,
     RevenueRiskInput,
     RevenueRiskOutput,
@@ -41,7 +44,11 @@ from app.tools.advanced import (
     customer_der_tool,
     energy_balance_tool,
     forecast_tool,
+    hybrid_severity_tool,
+    isolation_tool,
+    quality_for_day5,
     revenue_risk_tool,
+    shared_scope_for_triage,
     triage_tool,
 )
 from app.tools.advanced_analytics import analyze_weather_alignment
@@ -159,6 +166,7 @@ class RecordInvestigationInput(ToolInput):
     customer_der: CustomerDerOutput
     revenue_risk: RevenueRiskOutput
     triage: TriageOutput
+    hybrid_severity: AnalyticsEvidenceOutput
 
 
 class RecordInvestigationOutput(ToolOutput):
@@ -476,12 +484,21 @@ def record_investigation(
         ),
         _answer(
             2,
-            status=AnswerStatus.ANSWERED,
-            answer=f"The normalized severity is {data.severity:.2f} out of 100.",
+            status=(AnswerStatus.ANSWERED if data.hybrid_severity.status == "answered"
+                    else AnswerStatus.UNKNOWN),
+            answer=(
+                f"The hybrid severity is {data.hybrid_severity.values['severity_score']:.2f} "
+                "out of 100."
+                if data.hybrid_severity.status == "answered"
+                else "Hybrid severity is unknown because required evidence is unavailable."
+            ),
             confidence=data.reliability,
-            evidence=anomaly_refs,
-            tools=["calculate_baseline", "detect_anomaly"],
-            values={"severity": data.severity, "unit": "score_0_100"},
+            evidence=refs("hybrid_severity", "isolation", "anomaly"),
+            tools=["detect_anomaly", "detect_isolation_forest_anomaly",
+                   "compare_with_peers", "calculate_anomaly_severity"],
+            values={"severity": data.hybrid_severity.values.get("severity_score"),
+                    "raw_day3_severity": data.severity, "unit": "score_0_100"},
+            limitations=data.hybrid_severity.warnings,
             fresh_as_of=data.detected_at,
         ),
         _answer(
@@ -756,10 +773,12 @@ def record_investigation(
     answers.append(
         _answer(
             18,
-            status=AnswerStatus.ANSWERED,
+            status=(AnswerStatus.ANSWERED if data.triage.status == "answered"
+                    else AnswerStatus.UNKNOWN),
             answer=(
                 f"Triage is {data.triage.band}, rank {data.triage.active_rank} "
                 f"of {data.triage.active_count}."
+                if data.triage.status == "answered" else "Triage priority is unknown."
             ),
             confidence=data.reliability,
             evidence=triage_refs,
@@ -807,17 +826,18 @@ def record_investigation(
             ],
             confidence=data.revenue_risk.confidence,
         )
-    RankingRepository(session).add_assessment(
-        case_id=case.id,
-        report_id=report.id,
-        score=data.triage.score,
-        band=data.triage.band,
-        active_rank=data.triage.active_rank,
-        active_count=data.triage.active_count,
-        percentile=data.triage.percentile,
-        factors=data.triage.factors,
-        policy_version=data.triage.policy_version,
-    )
+    if data.triage.status == "answered":
+        RankingRepository(session).add_assessment(
+            case_id=case.id,
+            report_id=report.id,
+            score=data.triage.score,
+            band=data.triage.band,
+            active_rank=data.triage.active_rank,
+            active_count=data.triage.active_count,
+            percentile=data.triage.percentile,
+            factors=data.triage.factors,
+            policy_version=data.triage.policy_version,
+        )
     _recalculate_active_queue_history(
         session,
         new_case_id=case.id,
@@ -884,6 +904,8 @@ def build_registry(
     registry.register("analyze_customer_der_context", lambda data, _: customer_der_tool(data))
     registry.register("search_technical_knowledge", knowledge_tool)
     registry.register("estimate_revenue_at_risk", lambda data, _: revenue_risk_tool(data))
+    registry.register("detect_isolation_forest_anomaly", lambda data, _: isolation_tool(data))
+    registry.register("calculate_anomaly_severity", lambda data, _: hybrid_severity_tool(data))
     registry.register("calculate_triage_priority", lambda data, _: triage_tool(data))
     registry.register("create_case_and_record_investigation", record_investigation)
     return registry
@@ -963,6 +985,7 @@ class InvestigationService:
                 QualityInput(run_id=run.id, readings=window.readings),
                 QualityOutput,
             )
+            adapted_quality = quality_for_day5(quality)
             baseline = self._required(
                 "calculate_baseline",
                 BaselineInput(run_id=run.id, readings=window.readings, cutoff=event_time),
@@ -1037,6 +1060,22 @@ class InvestigationService:
                 ),
                 PeerComparisonOutput,
             )
+            isolation = self._required(
+                "detect_isolation_forest_anomaly",
+                IsolationInput(
+                    run_id=run.id, meter_id=command.meter_id,
+                    target_timestamp=event_time, readings=window.readings,
+                ),
+                AnalyticsEvidenceOutput,
+            )
+            hybrid_severity = self._required(
+                "calculate_anomaly_severity",
+                HybridSeverityInput(
+                    run_id=run.id, anomaly=selected_event,
+                    comparison=comparison, isolation=isolation,
+                ),
+                AnalyticsEvidenceOutput,
+            )
             topology = self._required(
                 "get_connected_assets",
                 self._topology_input(run.id, command.meter_id),
@@ -1053,6 +1092,7 @@ class InvestigationService:
                 ),
                 SharedIncidentOutput,
             )
+            adapted_scope = shared_scope_for_triage(shared)
             energy_balance = self._required(
                 "calculate_energy_balance",
                 self._energy_balance_input(
@@ -1127,7 +1167,12 @@ class InvestigationService:
                     tariff_version=tariff.name if tariff else None,
                     tariff_source=tariff.source if tariff else None,
                     tariff_name=tariff.name if tariff else None,
-                    data_reliable=(quality.reliable and selected_event.observed_kwh is not None),
+                    data_reliable=(
+                        adapted_quality.values["data_reliable"]
+                        and selected_event.observed_kwh is not None
+                        if adapted_quality.status == "answered" else None
+                    ),
+                    data_confidence=adapted_quality.values.get("data_confidence"),
                     quality_score=quality.quality_score,
                     calculation_timestamp=event_time,
                     window_start=event_time,
@@ -1149,8 +1194,8 @@ class InvestigationService:
                 TriageInput(
                     run_id=run.id,
                     target_case_id=provisional_case_id,
-                    technical_severity=selected_event.severity,
-                    scope_ratio=shared.affected_fraction or 0,
+                    technical_severity=hybrid_severity.values.get("severity_score"),
+                    scope_ratio=adapted_scope.values.get("scope_ratio"),
                     revenue_at_risk_jod=(
                         revenue.values.get("revenue_at_risk_jod", {}).get("base")
                         if revenue.status == "answered"
@@ -1165,11 +1210,9 @@ class InvestigationService:
                         / 3,
                     ),
                     upstream_evidence_score=(
-                        energy_balance.confidence
-                        if energy_balance.balance_status == "imbalanced"
-                        else 0
+                        energy_balance.triage_adapter.get("upstream_evidence_score")
                     ),
-                    data_confidence=quality.quality_score / 100,
+                    data_confidence=adapted_quality.values.get("data_confidence"),
                     active_queue=active_queue,
                 ),
                 TriageOutput,
@@ -1189,6 +1232,18 @@ class InvestigationService:
                 revenue,
                 triage,
             )
+            for key, source, output in (
+                ("quality_adapter", "adapt_day3_quality_for_day5", adapted_quality),
+                ("shared_scope_adapter", "adapt_day4_shared_incident_for_triage", adapted_scope),
+                ("isolation", "detect_isolation_forest_anomaly", isolation),
+                ("hybrid_severity", "calculate_anomaly_severity", hybrid_severity),
+            ):
+                evidence_drafts.append(EvidenceDraft(
+                    key=key, kind=key, source=source,
+                    value=output.model_dump(mode="json"),
+                    reliability=quality.quality_score / 100,
+                    observed_at=event_time,
+                ))
             hypotheses = self._hypotheses(quality, shared)
             precedent_ids = [item.case_id for item in precedents.exact_meter_cases]
             precedent_ids.extend(item.case_id for item in precedents.similar_system_cases)
@@ -1226,6 +1281,7 @@ class InvestigationService:
                     customer_der=customer_der,
                     revenue_risk=revenue,
                     triage=triage,
+                    hybrid_severity=hybrid_severity,
                 ),
                 RecordInvestigationOutput,
             )
@@ -1237,7 +1293,7 @@ class InvestigationService:
                 "case_id": str(recorded.case_id),
                 "report_id": str(recorded.report_id),
                 "incident_type": shared.incident_type,
-                "completed_tools": 18,
+                "completed_tools": 20,
             }
             event.status = "completed"
             self.session.flush()
@@ -1248,7 +1304,7 @@ class InvestigationService:
                 report_id=recorded.report_id,
                 status="case_created",
                 anomaly_count=len(anomaly.events),
-                tool_calls=18,
+                tool_calls=20,
             )
         except Exception as exc:
             run.status = "failed"

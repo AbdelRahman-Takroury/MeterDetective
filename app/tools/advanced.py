@@ -12,13 +12,26 @@ from pydantic import Field
 from app.contracts.common import EvidenceReference
 from app.contracts.tool import ToolInput, ToolOutput
 from app.tools.advanced_analytics import (
+    adapt_day3_anomaly_event_for_severity,
+    adapt_day3_quality_for_day5,
+    adapt_day4_peer_comparison_for_severity,
+    adapt_day4_shared_incident_for_triage,
+    adapt_energy_balance_for_triage,
     analyze_customer_der_context,
+    calculate_anomaly_severity,
     calculate_energy_balance,
     calculate_triage_priority,
+    detect_isolation_forest_anomaly,
     estimate_revenue_at_risk,
     forecast_expected_usage,
 )
-from app.tools.analytics import ReadingPoint
+from app.tools.analytics import (
+    AnomalyEvent,
+    PeerComparisonOutput,
+    QualityOutput,
+    ReadingPoint,
+    SharedIncidentOutput,
+)
 
 READING_COLUMN = "KWH/hh (per half hour)"
 
@@ -42,6 +55,89 @@ def _unknown(reason: str, *, source: str, kind: str) -> dict[str, Any]:
         ],
         "warnings": [reason],
     }
+
+
+class AnalyticsEvidenceOutput(ToolOutput):
+    status: Literal["answered", "unknown"]
+    values: dict[str, Any]
+    reason: str | None = None
+
+
+def _analytics_output(result: dict[str, Any]) -> AnalyticsEvidenceOutput:
+    # Invalid or unavailable evidence must not become a numeric fallback.
+    answered = result["status"] == "success"
+    reason = None if answered else result["reason"]
+    return AnalyticsEvidenceOutput(
+        status="answered" if answered else "unknown",
+        values=result,
+        reason=reason,
+        warnings=[reason] if reason else [],
+    )
+
+
+def quality_for_day5(data: QualityOutput) -> AnalyticsEvidenceOutput:
+    return _analytics_output(adapt_day3_quality_for_day5(
+        quality_score=data.quality_score,
+        reliable=data.reliable,
+        quality_status=data.status,
+    ))
+
+
+def shared_scope_for_triage(data: SharedIncidentOutput) -> AnalyticsEvidenceOutput:
+    return _analytics_output(adapt_day4_shared_incident_for_triage(
+        shared_status=data.status,
+        affected_fraction=data.affected_fraction,
+        incident_type=data.incident_type,
+        shared_confidence=data.confidence,
+    ))
+
+
+class IsolationInput(ToolInput):
+    meter_id: str
+    target_timestamp: datetime
+    readings: list[ReadingPoint]
+    contamination: float = Field(default=0.05, gt=0, le=0.5)
+    random_state: int = 42
+
+
+def isolation_tool(data: IsolationInput) -> AnalyticsEvidenceOutput:
+    return _analytics_output(detect_isolation_forest_anomaly(
+        _frame(data.meter_id, data.readings),
+        data.meter_id,
+        data.target_timestamp,
+        contamination=data.contamination,
+        random_state=data.random_state,
+    ))
+
+
+class HybridSeverityInput(ToolInput):
+    anomaly: AnomalyEvent
+    comparison: PeerComparisonOutput
+    isolation: AnalyticsEvidenceOutput
+
+
+def hybrid_severity_tool(data: HybridSeverityInput) -> AnalyticsEvidenceOutput:
+    day3 = adapt_day3_anomaly_event_for_severity(
+        anomaly_type=data.anomaly.anomaly_type,
+        deviation_pct=data.anomaly.components.get("deviation_pct"),
+        event_severity=data.anomaly.severity,
+    )
+    day4 = adapt_day4_peer_comparison_for_severity(
+        data.comparison.deviation_pct if data.comparison.status == "answered" else None
+    )
+    result = calculate_anomaly_severity(
+        usage_deviation_fraction=day3.get("usage_deviation_fraction"),
+        rule_based_score=day3.get("rule_based_score"),
+        isolation_score=(
+            data.isolation.values.get("isolation_score")
+            if data.isolation.status == "answered" else None
+        ),
+        peer_deviation_score=day4.get("peer_deviation_score"),
+    )
+    result["raw_day3_severity"] = data.anomaly.severity
+    result["day3_adapter"] = day3
+    result["day4_adapter"] = day4
+    return _analytics_output(result)
 
 
 class ForecastInput(ToolInput):
@@ -111,12 +207,16 @@ class EnergyBalanceOutput(ToolOutput):
     method_version: str | None = None
     reason: str | None = None
     confidence: float = Field(default=0, ge=0, le=1)
+    triage_adapter: dict[str, Any] = Field(default_factory=dict)
 
 
 def energy_balance_tool(data: EnergyBalanceInput) -> EnergyBalanceOutput:
     if data.transformer_kwh is None or not data.downstream_kwh:
         reason = "Transformer or downstream interval readings are unavailable."
-        return EnergyBalanceOutput(status="unknown", reason=reason, warnings=[reason])
+        return EnergyBalanceOutput(
+            status="unknown", reason=reason, warnings=[reason],
+            triage_adapter=adapt_energy_balance_for_triage({"status": "unknown"}),
+        )
     result = calculate_energy_balance(
         data.transformer_kwh,
         data.downstream_kwh,
@@ -129,6 +229,7 @@ def energy_balance_tool(data: EnergyBalanceInput) -> EnergyBalanceOutput:
     return EnergyBalanceOutput(
         status="answered",
         balance_status=result["balance_status"],
+        triage_adapter=adapt_energy_balance_for_triage(result),
         values={key: value for key, value in result.items() if key != "status"},
         method_version=result["method_version"],
         confidence=confidence,
@@ -229,7 +330,8 @@ class RevenueRiskInput(ToolInput):
     tariff_version: str | None = None
     tariff_source: str | None = None
     tariff_name: str | None = None
-    data_reliable: bool
+    data_reliable: bool | None = None
+    data_confidence: float | None = Field(default=None, ge=0, le=1)
     quality_score: float = Field(ge=0, le=100)
     calculation_timestamp: datetime
     window_start: datetime
@@ -249,6 +351,9 @@ class RevenueRiskOutput(ToolOutput):
 
 
 def revenue_risk_tool(data: RevenueRiskInput) -> RevenueRiskOutput:
+    if data.data_reliable is None or data.data_confidence is None:
+        reason = "Adapted reading quality is unavailable, so Revenue at Risk is unknown."
+        return RevenueRiskOutput(status="unknown", reason=reason, warnings=[reason])
     if data.expected_kwh is None:
         reason = "Forecast is unavailable, so Revenue at Risk is unknown."
         return RevenueRiskOutput(status="unknown", reason=reason, warnings=[reason])
@@ -279,13 +384,13 @@ def revenue_risk_tool(data: RevenueRiskInput) -> RevenueRiskOutput:
         tariff_id=data.tariff_id,
         values={key: value for key, value in result.items() if key != "status"},
         method_version=result["method_version"],
-        confidence=data.quality_score / 100,
+        confidence=data.data_confidence,
         evidence=[
             EvidenceReference(
                 source=data.tariff_source or "tariff_unavailable",
                 kind="revenue_at_risk",
                 observed_at=data.calculation_timestamp,
-                reliability=data.quality_score / 100,
+                reliability=data.data_confidence,
                 metadata={
                     "tariff_id": str(data.tariff_id),
                     "tariff_version": data.tariff_version,
@@ -305,31 +410,44 @@ class QueueCase(ToolOutput):
 
 class TriageInput(ToolInput):
     target_case_id: UUID
-    technical_severity: float = Field(ge=0, le=100)
-    scope_ratio: float = Field(ge=0, le=1)
+    technical_severity: float | None = Field(default=None, ge=0, le=100)
+    scope_ratio: float | None = Field(default=None, ge=0, le=1)
     revenue_at_risk_jod: float | None = Field(default=None, ge=0)
     revenue_reference_jod: float = Field(default=10, gt=0)
     recurrence_score: float = Field(ge=0, le=1)
-    upstream_evidence_score: float = Field(ge=0, le=1)
-    data_confidence: float = Field(ge=0, le=1)
+    upstream_evidence_score: float | None = Field(default=None, ge=0, le=1)
+    data_confidence: float | None = Field(default=None, ge=0, le=1)
     waiting_sla_score: float = Field(default=0, ge=0, le=1)
     active_queue: list[QueueCase] = Field(default_factory=list)
 
 
 class TriageOutput(ToolOutput):
-    status: Literal["answered"]
-    score: float = Field(ge=0, le=100)
-    band: str
-    active_rank: int = Field(ge=1)
-    active_count: int = Field(ge=1)
-    percentile: float = Field(ge=0, le=100)
-    factors: dict[str, Any]
-    policy_version: str
+    status: Literal["answered", "unknown"]
+    score: float | None = Field(default=None, ge=0, le=100)
+    band: str | None = None
+    active_rank: int | None = Field(default=None, ge=1)
+    active_count: int | None = Field(default=None, ge=1)
+    percentile: float | None = Field(default=None, ge=0, le=100)
+    factors: dict[str, Any] = Field(default_factory=dict)
+    policy_version: str | None = None
     revenue_available: bool
 
 
 def triage_tool(data: TriageInput) -> TriageOutput:
     revenue_available = data.revenue_at_risk_jod is not None
+    missing = [
+        name for name in (
+            "technical_severity", "upstream_evidence_score", "scope_ratio", "data_confidence"
+        )
+        if getattr(data, name) is None
+    ]
+    if missing:
+        return TriageOutput(
+            status="unknown",
+            revenue_available=revenue_available,
+            factors={"missing_inputs": missing},
+            warnings=[f"Triage is unknown: unavailable {', '.join(missing)}."],
+        )
     result = calculate_triage_priority(
         case_id=str(data.target_case_id),
         technical_severity=data.technical_severity,
