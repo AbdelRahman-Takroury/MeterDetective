@@ -1,0 +1,54 @@
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-meterdetective}
+      POSTGRES_USER: ${POSTGRES_USER:-meterdetective}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-meterdetective}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  pgadmin:
+    image: dpage/pgadmin4:9.8
+    ports:
+      - 5050:80
+    environment:
+      # Required by pgAdmin
+      PGADMIN_DEFAULT_EMAIL: takrouryninthg@gmail.com
+      PGADMIN_DEFAULT_PASSWORD: ${pgAdmin_PASSWORD}
+
+      # Don't require the user to login
+      PGADMIN_CONFIG_SERVER_MODE: 'False'
+
+      # Don't require a "master" password after logging in
+      PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED: 'False'
+
+  api:
+    build: .
+    volumes:
+      - ./data/processed:/app/data/processed:ro
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-meterdetective}:${POSTGRES_PASSWORD:-meterdetective}@db:5432/${POSTGRES_DB:-meterdetective}
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    ports:
+      - "8000:8000"
+
+volumes:
+  postgres_data:
