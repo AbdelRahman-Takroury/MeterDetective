@@ -1,0 +1,58 @@
+{
+  "validate_reading_quality": {
+    "status": "valid",
+    "quality_score": 100.0,
+    "reliable": true,
+    "metrics": {
+      "total_readings": 1345,
+      "missing_values": 0,
+      "negative_values": 0,
+      "zero_values": 0,
+      "duplicate_timestamps": 0,
+      "missing_intervals": 0,
+      "max_flatline_run": 1
+    }
+  },
+  "calculate_baseline": {
+    "status": "success",
+    "method": "weekday/half-hour median and IQR",
+    "profiles": [{
+      "weekday": 6,
+      "hour": 12,
+      "minute": 0,
+      "sample_count": 4,
+      "median_kwh": 10.0,
+      "q1_kwh": 9.9,
+      "q3_kwh": 10.1,
+      "iqr_kwh": 0.2
+    }],
+    "excluded_future_readings": 1
+  },
+  "detect_anomaly": {
+    "status": "anomalies_detected",
+    "overall_severity": 70.0,
+    "events": [{
+      "timestamp": "2026-09-20T12:00:00Z",
+      "anomaly_type": "drop",
+      "observed_kwh": 3.0,
+      "expected_kwh": 10.0,
+      "severity": 70.0,
+      "components": {"deviation_pct": 70.0, "lower_bound": 9.6}
+    }]
+  },
+  "select_dynamic_peers": {
+    "status": "answered",
+    "peers": [
+      {"meter_id": "M2", "similarity": 0.98, "overlap": 672},
+      {"meter_id": "M3", "similarity": 0.96, "overlap": 672}
+    ]
+  },
+  "detect_shared_incident": {
+    "status": "answered",
+    "incident_type": "local",
+    "confidence": 0.9,
+    "affected_count": 0,
+    "answered_count": 2,
+    "affected_fraction": 0.0
+  }
+}

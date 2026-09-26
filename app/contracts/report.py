@@ -15,6 +15,14 @@ class AnswerStatus(StrEnum):
     PENDING_VERIFICATION = "pending_verification"
 
 
+class ReportStatus(StrEnum):
+    INVESTIGATING = "investigating"
+    AWAITING_APPROVAL = "awaiting_approval"
+    PENDING_VERIFICATION = "pending_verification"
+    COMPLETE = "complete"
+    INCOMPLETE = "incomplete"
+
+
 class InvestigationAnswer(ContractModel):
     question_id: int = Field(ge=1, le=18)
     status: AnswerStatus
@@ -66,12 +74,12 @@ class InvestigationReport(ContractModel):
     report_id: UUID
     case_id: UUID
     version: int = Field(ge=1)
-    status: str
+    status: ReportStatus
     answers: list[InvestigationAnswer]
-    revenue_at_risk: RevenueAtRisk
+    revenue_at_risk: RevenueAtRisk | None = None
     precedent_case_ids: list[UUID] = Field(default_factory=list)
-    meter_pattern_summary: str
-    triage: TriageAssessment
+    meter_pattern_summary: str = "No precedent analysis has been completed."
+    triage: TriageAssessment | None = None
     generated_at: datetime = Field(default_factory=utc_now)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
@@ -81,6 +89,12 @@ class InvestigationReport(ContractModel):
         expected = list(range(1, 19))
         if sorted(ids) != expected:
             raise ValueError("answers must contain each question ID from 1 through 18 exactly once")
+        verification = next(answer for answer in self.answers if answer.question_id == 15)
+        if (
+            self.status is ReportStatus.COMPLETE
+            and verification.status is not AnswerStatus.ANSWERED
+        ):
+            raise ValueError("a complete report requires an answered verification question")
         return self
 
     @property

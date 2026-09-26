@@ -172,6 +172,10 @@ class Hypothesis(IdMixin, Base):
     confidence: Mapped[float] = mapped_column(Float)
     support_json: Mapped[list[Any]] = mapped_column(JSON, default=list)
     contradiction_json: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    update_history_json: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
     __table_args__ = (
         CheckConstraint(
             "confidence >= 0 AND confidence <= 1", name="hypothesis_confidence_range"
@@ -216,7 +220,7 @@ class AgentRun(IdMixin, Base):
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
-class ToolExecution(IdMixin, Base):
+class ToolExecution(IdMixin, TimestampMixin, Base):
     __tablename__ = "tool_executions"
     run_id: Mapped[UUID] = mapped_column(ForeignKey("agent_runs.id"), index=True)
     tool_name: Mapped[str] = mapped_column(String(100), index=True)

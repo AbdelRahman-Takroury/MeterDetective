@@ -31,6 +31,9 @@ def test_offline_upgrade_covers_current_schema() -> None:
     assert "ALTER TABLE events ALTER COLUMN idempotency_key SET NOT NULL" in sql
     assert "USING hnsw (embedding vector_cosine_ops)" in sql
     assert "UPDATE alembic_version SET version_num='20260922_0002'" in sql
+    assert "ALTER TABLE hypotheses ADD COLUMN update_history_json" in sql
+    assert "ALTER TABLE tool_executions ADD COLUMN created_at" in sql
+    assert "UPDATE alembic_version SET version_num='20260926_0003'" in sql
 
 
 def test_offline_downgrade_removes_day2b_then_baseline_schema() -> None:
@@ -38,5 +41,7 @@ def test_offline_downgrade_removes_day2b_then_baseline_schema() -> None:
 
     assert "DROP INDEX ix_document_chunks_embedding_hnsw" in sql
     assert "ALTER TABLE events DROP COLUMN idempotency_key" in sql
+    assert "ALTER TABLE hypotheses DROP COLUMN update_history_json" in sql
+    assert "ALTER TABLE tool_executions DROP COLUMN created_at" in sql
     for table_name in Base.metadata.tables:
         assert f"DROP TABLE {table_name}" in sql

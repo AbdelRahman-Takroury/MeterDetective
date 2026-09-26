@@ -273,6 +273,81 @@ class HistoryRepository:
         )
 
 
+class HypothesisRepository:
+    def __init__(self, session: Session) -> None:
+        self.session = session
+
+    def list(self, case_id: UUID) -> list[models.Hypothesis]:
+        return list(
+            self.session.scalars(
+                select(models.Hypothesis)
+                .where(models.Hypothesis.case_id == case_id)
+                .order_by(models.Hypothesis.confidence.desc(), models.Hypothesis.label)
+            )
+        )
+
+    def update_confidence(
+        self,
+        hypothesis_id: UUID,
+        *,
+        confidence: float,
+        reason: str,
+        supporting_evidence_ids: list[UUID] | None = None,
+        contradicting_evidence_ids: list[UUID] | None = None,
+    ) -> models.Hypothesis:
+        if not 0 <= confidence <= 1:
+            raise ValueError("Hypothesis confidence must be between 0 and 1")
+        if not reason.strip():
+            raise ValueError("Hypothesis updates require a reason")
+        hypothesis = self.session.get(models.Hypothesis, hypothesis_id)
+        if hypothesis is None:
+            raise RepositoryNotFound("Hypothesis not found")
+        support = supporting_evidence_ids or []
+        contradiction = contradicting_evidence_ids or []
+        for evidence_id in [*support, *contradiction]:
+            evidence = self.session.get(models.Evidence, evidence_id)
+            if evidence is None or evidence.case_id != hypothesis.case_id:
+                raise RepositoryNotFound("Evidence does not belong to the hypothesis case")
+        previous = hypothesis.confidence
+        hypothesis.confidence = confidence
+        hypothesis.support_json = list(
+            dict.fromkeys([*hypothesis.support_json, *(str(item) for item in support)])
+        )
+        hypothesis.contradiction_json = list(
+            dict.fromkeys(
+                [*hypothesis.contradiction_json, *(str(item) for item in contradiction)]
+            )
+        )
+        history = list(hypothesis.update_history_json)
+        now = datetime.now(UTC)
+        history.append(
+            {
+                "at": now.isoformat(),
+                "reason": reason,
+                "previous_confidence": previous,
+                "confidence": confidence,
+                "supporting_evidence": [str(item) for item in support],
+                "contradicting_evidence": [str(item) for item in contradiction],
+            }
+        )
+        hypothesis.update_history_json = history
+        hypothesis.updated_at = now
+        self.session.add(
+            models.CaseEvent(
+                case_id=hypothesis.case_id,
+                event_type="hypothesis_updated",
+                details_json={
+                    "hypothesis_id": str(hypothesis.id),
+                    "label": hypothesis.label,
+                    "previous_confidence": previous,
+                    "confidence": confidence,
+                    "reason": reason,
+                },
+            )
+        )
+        self.session.flush()
+        return hypothesis
+
 class TariffRepository:
     def __init__(self, session: Session) -> None:
         self.session = session

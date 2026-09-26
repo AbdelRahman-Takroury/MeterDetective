@@ -67,3 +67,35 @@ class CaseListResponse(BaseModel):
     items: list[CaseSummary]
     offset: int
     limit: int
+
+
+class ReplayStepRequest(BaseModel):
+    meter_id: str
+    event_time: datetime
+    lookback_days: int = 35
+    idempotency_key: str | None = None
+
+
+class ReplayStepResponse(BaseModel):
+    event_id: UUID
+    run_id: UUID
+    case_id: UUID | None
+    report_id: UUID | None
+    status: str
+    duplicate: bool
+    anomaly_count: int
+    tool_calls: int
+
+
+class CaseDetailResponse(BaseModel):
+    case: CaseSummary
+    meter_ids: list[str]
+    evidence: list[dict[str, Any]]
+    hypotheses: list[dict[str, Any]]
+    latest_report: dict[str, Any] | None
+    case_events: list[dict[str, Any]]
+
+
+class CaseTraceResponse(BaseModel):
+    case_id: UUID
+    runs: list[dict[str, Any]]

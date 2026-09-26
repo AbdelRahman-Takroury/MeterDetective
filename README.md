@@ -24,6 +24,19 @@ otherwise the API generates a UUID. Request completion and failures are logged a
 ID, method, path, status, and duration. Query strings, request bodies, and driver error text are
 not logged. Uvicorn access logs are disabled to avoid duplicate plaintext request lines.
 
+## Day 3/4 investigation slice
+
+`POST /api/replay/step` accepts a meter ID and timezone-aware event timestamp. It runs tools 1–5,
+7–10, 15, and 18 through the persistent tool registry. Normal readings stop safely; abnormal
+readings create one versioned case/report with explicit statuses for all 18 questions. Repeating the
+same request returns the existing run and case.
+
+Use `GET /api/cases/{case_id}` for evidence, competing hypotheses, confidence history, and the latest
+report. Use `GET /api/cases/{case_id}/trace` for the ordered tool trace, including controlled errors.
+Meter history is available at `GET /api/meters/{meter_id}/precedents`. See
+`docs/day_3_4_acceptance.md` for clean-run gates and `docs/anomaly_scenarios_and_metrics.md` for the
+deterministic formulas and limitations.
+
 ## Repeatable seed/import
 
 For a quick database smoke test, rebuild the API after pulling these changes and import the
