@@ -24,7 +24,7 @@ def _post_json(
             "Accept": "application/json",
             "User-Agent": "MeterDetective/0.1",
             **headers,
-            },
+        },
         method="POST",
     )
     with urlopen(request, timeout=timeout) as response:  # noqa: S310 - configured provider

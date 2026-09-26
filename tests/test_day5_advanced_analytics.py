@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from advanced_analytics import (
+from app.tools.advanced_analytics import (
     adapt_day3_anomaly_event_for_severity,
     adapt_day3_quality_for_day5,
     adapt_day4_peer_comparison_for_severity,

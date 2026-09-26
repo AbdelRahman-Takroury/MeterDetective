@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import Any, cast
-from uuid import UUID
+from uuid import UUID, uuid4
 
+import pandas as pd
 from pydantic import Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -15,7 +18,33 @@ from app.contracts.report import AnswerStatus, InvestigationAnswer
 from app.contracts.tool import ToolInput, ToolOutput
 from app.core.config import get_settings
 from app.db import models
-from app.db.repositories import EventRepository, ReadingRepository, ReportRepository
+from app.db.repositories import (
+    EventRepository,
+    FinanceRepository,
+    RankingRepository,
+    ReadingRepository,
+    ReportRepository,
+    TariffRepository,
+)
+from app.tools.advanced import (
+    CustomerDerInput,
+    CustomerDerOutput,
+    EnergyBalanceInput,
+    EnergyBalanceOutput,
+    ForecastInput,
+    ForecastOutput,
+    QueueCase,
+    RevenueRiskInput,
+    RevenueRiskOutput,
+    TriageInput,
+    TriageOutput,
+    customer_der_tool,
+    energy_balance_tool,
+    forecast_tool,
+    revenue_risk_tool,
+    triage_tool,
+)
+from app.tools.advanced_analytics import analyze_weather_alignment
 from app.tools.analytics import (
     AnomalyInput,
     AnomalyOutput,
@@ -106,6 +135,7 @@ class HypothesisDraft(ToolOutput):
 
 
 class RecordInvestigationInput(ToolInput):
+    target_case_id: UUID
     event_id: UUID
     meter_id: str
     anomaly_type: str
@@ -123,6 +153,12 @@ class RecordInvestigationInput(ToolInput):
     weather_summary: dict[str, Any] = Field(default_factory=dict)
     knowledge_status: str = "no_results"
     knowledge_citations: list[dict[str, Any]] = Field(default_factory=list)
+    weather_alignment: dict[str, Any] = Field(default_factory=dict)
+    forecast: ForecastOutput
+    energy_balance: EnergyBalanceOutput
+    customer_der: CustomerDerOutput
+    revenue_risk: RevenueRiskOutput
+    triage: TriageOutput
 
 
 class RecordInvestigationOutput(ToolOutput):
@@ -159,6 +195,153 @@ def _answer(
     )
 
 
+def _recalculate_active_queue_history(
+    session: Session, *, new_case_id: UUID, calculated_at: datetime
+) -> None:
+    """Version prior active reports when a newly inserted case changes their queue snapshot."""
+    ranking = RankingRepository(session)
+    reports = ReportRepository(session)
+    finance = FinanceRepository(session)
+    active = [case for case in ranking.active_cases(limit=500) if case.triage_score is not None]
+    scores = [float(case.triage_score) for case in active]
+    active_count = len(active)
+    if active_count < 2:
+        return
+
+    for case in active:
+        if case.id == new_case_id:
+            continue
+        score = float(case.triage_score)
+        active_rank = 1 + sum(other > score for other in scores)
+        percentile = round(
+            100.0
+            if active_count == 1
+            else 100 * sum(other < score for other in scores) / (active_count - 1),
+            2,
+        )
+        previous_report = reports.latest(case.id)
+        if previous_report is None:
+            continue
+        previous_assessment = ranking.by_report(previous_report.id)
+        if previous_assessment is None:
+            continue
+        if (
+            previous_assessment.active_rank == active_rank
+            and previous_assessment.active_count == active_count
+            and float(previous_assessment.percentile) == percentile
+        ):
+            continue
+
+        snapshot = models.Evidence(
+            case_id=case.id,
+            kind="triage_recalculation",
+            source="database.active_cases",
+            value_json={
+                "triggering_case_id": str(new_case_id),
+                "active_rank": active_rank,
+                "active_count": active_count,
+                "percentile": percentile,
+                "policy_version": previous_assessment.policy_version,
+                "calculated_at": calculated_at.isoformat(),
+            },
+            reliability=1,
+        )
+        session.add(snapshot)
+        session.flush()
+
+        answers = deepcopy(previous_report.answers_json)
+        triage_answer = next(item for item in answers if item["question_id"] == 18)
+        factors = deepcopy(previous_assessment.factors_json)
+        factors["queue_recalculation"] = {
+            "triggering_case_id": str(new_case_id),
+            "calculated_at": calculated_at.isoformat(),
+        }
+        triage_answer.update(
+            {
+                "answer": (
+                    f"Triage is {previous_assessment.band}, rank {active_rank} "
+                    f"of {active_count}."
+                ),
+                "structured_values": {
+                    "score": score,
+                    "band": previous_assessment.band,
+                    "active_rank": active_rank,
+                    "active_count": active_count,
+                    "percentile": percentile,
+                    "factors": factors,
+                    "policy_version": previous_assessment.policy_version,
+                },
+                "fresh_as_of": calculated_at.isoformat(),
+            }
+        )
+        reference = EvidenceReference(
+            evidence_id=str(snapshot.id),
+            source=snapshot.source,
+            kind=snapshot.kind,
+            observed_at=calculated_at,
+            reliability=1,
+            metadata=snapshot.value_json,
+        ).model_dump(mode="json")
+        triage_answer["supporting_evidence"] = [
+            *triage_answer.get("supporting_evidence", []),
+            reference,
+        ]
+        triage_answer["data_sources"] = sorted(
+            {*triage_answer.get("data_sources", []), snapshot.source}
+        )
+
+        previous_financial = finance.by_report(previous_report.id)
+        report = reports.add_version(
+            case_id=case.id,
+            status=previous_report.status,
+            answers=answers,
+            completeness=previous_report.completeness,
+        )
+        if previous_financial is not None:
+            finance.add(
+                case_id=case.id,
+                report_id=report.id,
+                tariff_id=previous_financial.tariff_id,
+                missing_kwh=(
+                    previous_financial.missing_kwh_low,
+                    previous_financial.missing_kwh_base,
+                    previous_financial.missing_kwh_high,
+                ),
+                risk_jod=(
+                    previous_financial.risk_jod_low,
+                    previous_financial.risk_jod_base,
+                    previous_financial.risk_jod_high,
+                ),
+                assumptions=deepcopy(previous_financial.assumptions_json),
+                confidence=previous_financial.confidence,
+            )
+        ranking.add_assessment(
+            case_id=case.id,
+            report_id=report.id,
+            score=score,
+            band=previous_assessment.band,
+            active_rank=active_rank,
+            active_count=active_count,
+            percentile=percentile,
+            factors=factors,
+            policy_version=previous_assessment.policy_version,
+        )
+        session.add(
+            models.CaseEvent(
+                case_id=case.id,
+                event_type="triage_recalculated",
+                details_json={
+                    "triggering_case_id": str(new_case_id),
+                    "report_id": str(report.id),
+                    "report_version": report.version,
+                    "active_rank": active_rank,
+                    "active_count": active_count,
+                    "percentile": percentile,
+                },
+            )
+        )
+
+
 def record_investigation(
     data: RecordInvestigationInput, session: Session
 ) -> RecordInvestigationOutput:
@@ -176,6 +359,7 @@ def record_investigation(
         raise ValueError("Investigation already recorded for this event and anomaly")
 
     case = models.Case(
+        id=data.target_case_id,
         title=f"{data.anomaly_type.replace('_', ' ').title()} at {data.meter_id}",
         status="investigating",
         confidence=max((item.confidence for item in data.hypothesis_drafts), default=0),
@@ -274,6 +458,10 @@ def record_investigation(
     precedent_refs = refs("precedents")
     weather_refs = refs("weather")
     knowledge_refs = refs("knowledge")
+    der_refs = refs("customer_der")
+    energy_refs = refs("energy_balance")
+    revenue_refs = refs("revenue_risk")
+    triage_refs = refs("triage")
     leading = max(hypotheses, key=lambda item: item.confidence)
     answers = [
         _answer(
@@ -347,19 +535,24 @@ def record_investigation(
                     limitations=["No qualified peer group was available."],
                 )
             )
-    if data.weather_status == "answered" and weather_refs:
+    if (
+        data.weather_status == "answered"
+        and data.weather_alignment.get("status") == "success"
+        and weather_refs
+    ):
         answers.append(
             _answer(
                 6,
                 status=AnswerStatus.ANSWERED,
                 answer=(
-                    "Weather observations were retrieved for the event window; causal "
-                    "interpretation remains limited to deterministic residual analysis."
+                    "Weather evidence is "
+                    f"{data.weather_alignment.get('weather_evidence', 'unknown')}; "
+                    "it is contextual evidence and does not prove causation."
                 ),
                 confidence=0.75,
                 evidence=weather_refs,
                 tools=["get_weather_context"],
-                values=data.weather_summary,
+                values={**data.weather_summary, **data.weather_alignment},
                 limitations=["Weather context alone cannot establish the cause of a load change."],
                 fresh_as_of=data.detected_at,
             )
@@ -376,18 +569,80 @@ def record_investigation(
                 fresh_as_of=data.detected_at,
             )
         )
-    for question_id, limitation in (
-        (7, "Customer-behavior evidence is scheduled for Day 5-A."),
-        (8, "DER-context analysis is scheduled for Day 5."),
-        (9, "Transformer energy-balance tool 11 is scheduled for Day 5."),
-    ):
+    if data.customer_der.status == "answered" and der_refs:
+        behavior = data.customer_der.customer_behavior
         answers.append(
             _answer(
-                question_id,
+                7,
+                status=AnswerStatus.ANSWERED,
+                answer=f"Customer-behavior evidence is {behavior.get('evidence', 'unknown')}.",
+                confidence=0.7,
+                evidence=der_refs,
+                tools=["analyze_customer_der_context"],
+                values={"customer_behavior": behavior},
+                limitations=behavior.get("limitations", []),
+                fresh_as_of=data.detected_at,
+            )
+        )
+        answers.append(
+            _answer(
+                8,
+                status=AnswerStatus.ANSWERED,
+                answer=(
+                    f"EV evidence is {data.customer_der.ev.get('evidence', 'unknown')}; "
+                    f"solar evidence is {data.customer_der.solar.get('evidence', 'unknown')}."
+                ),
+                confidence=0.7,
+                evidence=der_refs,
+                tools=["analyze_customer_der_context"],
+                values={"ev": data.customer_der.ev, "solar": data.customer_der.solar},
+                limitations=[
+                    "DER signatures and configured metadata are supporting evidence only."
+                ],
+                fresh_as_of=data.detected_at,
+            )
+        )
+    else:
+        for question_id in (7, 8):
+            answers.append(
+                _answer(
+                    question_id,
+                    status=AnswerStatus.UNKNOWN,
+                    answer="Customer and DER evidence is unavailable.",
+                    confidence=0,
+                    limitations=[
+                        data.customer_der.reason
+                        or "Expected usage or customer metadata was unavailable."
+                    ],
+                    fresh_as_of=data.detected_at,
+                )
+            )
+    if data.energy_balance.status == "answered" and energy_refs:
+        answers.append(
+            _answer(
+                9,
+                status=AnswerStatus.ANSWERED,
+                answer=f"Transformer energy balance is {data.energy_balance.balance_status}.",
+                confidence=data.energy_balance.confidence,
+                evidence=energy_refs,
+                tools=["calculate_energy_balance"],
+                values=data.energy_balance.values,
+                limitations=["Energy balance depends on interval coverage and configured losses."],
+                fresh_as_of=data.detected_at,
+            )
+        )
+    else:
+        answers.append(
+            _answer(
+                9,
                 status=AnswerStatus.UNKNOWN,
-                answer="Evidence is not yet available.",
+                answer="Transformer energy balance is unavailable.",
                 confidence=0,
-                limitations=[limitation],
+                limitations=[
+                    data.energy_balance.reason
+                    or "Transformer or downstream readings were unavailable."
+                ],
+                fresh_as_of=data.detected_at,
             )
         )
     hypothesis_refs = (
@@ -461,15 +716,31 @@ def record_investigation(
             limitations=["No post-event verification window exists yet."],
         )
     )
-    answers.append(
-        _answer(
-            16,
-            status=AnswerStatus.UNKNOWN,
-            answer="Revenue at Risk has not been calculated.",
-            confidence=0,
-            limitations=["Financial tool 16 is scheduled for Day 5."],
+    if data.revenue_risk.status == "answered" and revenue_refs:
+        answers.append(
+            _answer(
+                16,
+                status=AnswerStatus.ANSWERED,
+                answer="Revenue at Risk was calculated deterministically in JOD.",
+                confidence=data.revenue_risk.confidence,
+                evidence=revenue_refs,
+                tools=["estimate_revenue_at_risk"],
+                values=data.revenue_risk.values,
+                limitations=data.revenue_risk.values.get("assumptions", []),
+                fresh_as_of=data.detected_at,
+            )
         )
-    )
+    else:
+        answers.append(
+            _answer(
+                16,
+                status=AnswerStatus.UNKNOWN,
+                answer="Revenue at Risk is unknown.",
+                confidence=0,
+                limitations=[data.revenue_risk.reason or "No unique applicable tariff exists."],
+                fresh_as_of=data.detected_at,
+            )
+        )
     answers.append(
         _answer(
             17,
@@ -485,10 +756,25 @@ def record_investigation(
     answers.append(
         _answer(
             18,
-            status=AnswerStatus.UNKNOWN,
-            answer="Dynamic queue ranking has not been calculated.",
-            confidence=0,
-            limitations=["Triage tool 17 is scheduled for Day 5."],
+            status=AnswerStatus.ANSWERED,
+            answer=(
+                f"Triage is {data.triage.band}, rank {data.triage.active_rank} "
+                f"of {data.triage.active_count}."
+            ),
+            confidence=data.reliability,
+            evidence=triage_refs,
+            tools=["calculate_triage_priority"],
+            values={
+                "score": data.triage.score,
+                "band": data.triage.band,
+                "active_rank": data.triage.active_rank,
+                "active_count": data.triage.active_count,
+                "percentile": data.triage.percentile,
+                "factors": data.triage.factors,
+                "policy_version": data.triage.policy_version,
+            },
+            limitations=data.triage.warnings,
+            fresh_as_of=data.detected_at,
         )
     )
 
@@ -500,6 +786,42 @@ def record_investigation(
             for item in sorted(answers, key=lambda answer: answer.question_id)
         ],
         completeness=1,
+    )
+    if data.revenue_risk.status == "answered" and data.revenue_risk.tariff_id:
+        values = data.revenue_risk.values
+        missing = float(values["expected_missing_kwh"])
+        risk = values["revenue_at_risk_jod"]
+        FinanceRepository(session).add(
+            case_id=case.id,
+            report_id=report.id,
+            tariff_id=data.revenue_risk.tariff_id,
+            missing_kwh=(missing, missing, missing),
+            risk_jod=(
+                Decimal(str(risk["low"])),
+                Decimal(str(risk["base"])),
+                Decimal(str(risk["high"])),
+            ),
+            assumptions=[
+                *values.get("assumptions", []),
+                {"method_version": data.revenue_risk.method_version},
+            ],
+            confidence=data.revenue_risk.confidence,
+        )
+    RankingRepository(session).add_assessment(
+        case_id=case.id,
+        report_id=report.id,
+        score=data.triage.score,
+        band=data.triage.band,
+        active_rank=data.triage.active_rank,
+        active_count=data.triage.active_count,
+        percentile=data.triage.percentile,
+        factors=data.triage.factors,
+        policy_version=data.triage.policy_version,
+    )
+    _recalculate_active_queue_history(
+        session,
+        new_case_id=case.id,
+        calculated_at=datetime.now(UTC),
     )
     session.add(
         models.CaseEvent(
@@ -551,13 +873,18 @@ def build_registry(
     registry.register("validate_reading_quality", lambda data, _: validate_reading_quality(data))
     registry.register("calculate_baseline", lambda data, _: calculate_baseline(data))
     registry.register("detect_anomaly", lambda data, _: detect_anomaly(data))
+    registry.register("forecast_expected_usage", lambda data, _: forecast_tool(data))
     registry.register("select_dynamic_peers", lambda data, _: select_dynamic_peers(data))
     registry.register("compare_with_peers", lambda data, _: compare_with_peers(data))
     registry.register("get_connected_assets", lambda data, _: get_connected_assets(data))
     registry.register("detect_shared_incident", lambda data, _: detect_shared_incident(data))
+    registry.register("calculate_energy_balance", lambda data, _: energy_balance_tool(data))
     registry.register("find_meter_precedents", find_meter_precedents)
     registry.register("get_weather_context", lambda data, _: weather_client.get(data))
+    registry.register("analyze_customer_der_context", lambda data, _: customer_der_tool(data))
     registry.register("search_technical_knowledge", knowledge_tool)
+    registry.register("estimate_revenue_at_risk", lambda data, _: revenue_risk_tool(data))
+    registry.register("calculate_triage_priority", lambda data, _: triage_tool(data))
     registry.register("create_case_and_record_investigation", record_investigation)
     return registry
 
@@ -670,6 +997,16 @@ class InvestigationService:
                 )
 
             selected_event = max(anomaly.events, key=lambda item: item.severity)
+            forecast = self._required(
+                "forecast_expected_usage",
+                ForecastInput(
+                    run_id=run.id,
+                    meter_id=command.meter_id,
+                    target_timestamp=event_time,
+                    readings=window.readings,
+                ),
+                ForecastOutput,
+            )
             target_series = MeterSeries(
                 meter_id=command.meter_id,
                 customer_segment=profile.customer_segment,
@@ -716,10 +1053,12 @@ class InvestigationService:
                 ),
                 SharedIncidentOutput,
             )
-            precedents = self._required(
-                "find_meter_precedents",
-                PrecedentInput(run_id=run.id, meter_id=command.meter_id),
-                PrecedentOutput,
+            energy_balance = self._required(
+                "calculate_energy_balance",
+                self._energy_balance_input(
+                    run.id, profile, event_time, target_series, candidates
+                ),
+                EnergyBalanceOutput,
             )
             settings = get_settings()
             weather = self._required(
@@ -733,6 +1072,31 @@ class InvestigationService:
                 ),
                 WeatherContextOutput,
             )
+            weather_alignment = self._weather_alignment(
+                weather,
+                event_time=event_time,
+                actual_kwh=selected_event.observed_kwh,
+                expected_kwh=forecast.expected_kwh,
+            )
+            customer_der = self._required(
+                "analyze_customer_der_context",
+                CustomerDerInput(
+                    run_id=run.id,
+                    meter_id=command.meter_id,
+                    target_timestamp=event_time,
+                    actual_kwh=selected_event.observed_kwh or 0,
+                    expected_kwh=(
+                        forecast.expected_kwh
+                        if selected_event.observed_kwh is not None
+                        else None
+                    ),
+                    readings=window.readings,
+                    has_ev=profile.has_ev,
+                    has_solar=profile.has_solar,
+                    metadata_source=profile.metadata_source,
+                ),
+                CustomerDerOutput,
+            )
             knowledge = self._required(
                 "search_technical_knowledge",
                 KnowledgeSearchInput(
@@ -740,6 +1104,75 @@ class InvestigationService:
                     query=f"smart meter {selected_event.anomaly_type} {shared.incident_type}",
                 ),
                 KnowledgeSearchOutput,
+            )
+            precedents = self._required(
+                "find_meter_precedents",
+                PrecedentInput(run_id=run.id, meter_id=command.meter_id),
+                PrecedentOutput,
+            )
+            tariffs = (
+                TariffRepository(self.session).effective(profile.customer_segment, event_time)
+                if profile.customer_segment
+                else []
+            )
+            tariff = tariffs[0] if len(tariffs) == 1 else None
+            revenue = self._required(
+                "estimate_revenue_at_risk",
+                RevenueRiskInput(
+                    run_id=run.id,
+                    expected_kwh=forecast.expected_kwh,
+                    observed_kwh=selected_event.observed_kwh or 0,
+                    tariff_id=tariff.id if tariff else None,
+                    tariff_jod_per_kwh=float(tariff.jod_per_kwh) if tariff else None,
+                    tariff_version=tariff.name if tariff else None,
+                    tariff_source=tariff.source if tariff else None,
+                    tariff_name=tariff.name if tariff else None,
+                    data_reliable=(quality.reliable and selected_event.observed_kwh is not None),
+                    quality_score=quality.quality_score,
+                    calculation_timestamp=event_time,
+                    window_start=event_time,
+                    window_end=event_time + timedelta(minutes=30),
+                    forecast_reference=forecast.method_version,
+                    observed_reference=f"reading:{command.meter_id}:{event_time.isoformat()}",
+                    quality_reference=f"tool-run:{run.id}:validate_reading_quality",
+                ),
+                RevenueRiskOutput,
+            )
+            provisional_case_id = uuid4()
+            active_queue = [
+                QueueCase(case_id=str(item.id), priority_score=item.triage_score)
+                for item in RankingRepository(self.session).active_cases()
+                if item.triage_score is not None
+            ]
+            triage = self._required(
+                "calculate_triage_priority",
+                TriageInput(
+                    run_id=run.id,
+                    target_case_id=provisional_case_id,
+                    technical_severity=selected_event.severity,
+                    scope_ratio=shared.affected_fraction or 0,
+                    revenue_at_risk_jod=(
+                        revenue.values.get("revenue_at_risk_jod", {}).get("base")
+                        if revenue.status == "answered"
+                        else None
+                    ),
+                    recurrence_score=min(
+                        1,
+                        (
+                            len(precedents.exact_meter_cases)
+                            + len(precedents.similar_system_cases)
+                        )
+                        / 3,
+                    ),
+                    upstream_evidence_score=(
+                        energy_balance.confidence
+                        if energy_balance.balance_status == "imbalanced"
+                        else 0
+                    ),
+                    data_confidence=quality.quality_score / 100,
+                    active_queue=active_queue,
+                ),
+                TriageOutput,
             )
             evidence_drafts = self._evidence_drafts(
                 event_time,
@@ -750,6 +1183,11 @@ class InvestigationService:
                 precedents,
                 weather,
                 knowledge,
+                forecast,
+                energy_balance,
+                customer_der,
+                revenue,
+                triage,
             )
             hypotheses = self._hypotheses(quality, shared)
             precedent_ids = [item.case_id for item in precedents.exact_meter_cases]
@@ -758,6 +1196,7 @@ class InvestigationService:
                 "create_case_and_record_investigation",
                 RecordInvestigationInput(
                     run_id=run.id,
+                    target_case_id=provisional_case_id,
                     event_id=event.id,
                     meter_id=command.meter_id,
                     anomaly_type=selected_event.anomaly_type,
@@ -781,6 +1220,12 @@ class InvestigationService:
                     knowledge_citations=[
                         item.model_dump(mode="json") for item in knowledge.citations
                     ],
+                    weather_alignment=weather_alignment,
+                    forecast=forecast,
+                    energy_balance=energy_balance,
+                    customer_der=customer_der,
+                    revenue_risk=revenue,
+                    triage=triage,
                 ),
                 RecordInvestigationOutput,
             )
@@ -792,7 +1237,7 @@ class InvestigationService:
                 "case_id": str(recorded.case_id),
                 "report_id": str(recorded.report_id),
                 "incident_type": shared.incident_type,
-                "completed_tools": 13,
+                "completed_tools": 18,
             }
             event.status = "completed"
             self.session.flush()
@@ -803,7 +1248,7 @@ class InvestigationService:
                 report_id=recorded.report_id,
                 status="case_created",
                 anomaly_count=len(anomaly.events),
-                tool_calls=13,
+                tool_calls=18,
             )
         except Exception as exc:
             run.status = "failed"
@@ -812,6 +1257,71 @@ class InvestigationService:
             event.status = "failed"
             self.session.flush()
             raise
+
+    def _energy_balance_input(
+        self,
+        run_id: UUID,
+        profile: MeterProfileOutput,
+        event_time: datetime,
+        target: MeterSeries,
+        candidates: list[MeterSeries],
+    ) -> EnergyBalanceInput:
+        transformer_kwh = None
+        if profile.transformer_id is not None:
+            rows = ReadingRepository(self.session).transformer_window(
+                profile.transformer_id,
+                event_time,
+                event_time + timedelta(minutes=30),
+                limit=2,
+            )
+            if len(rows) == 1:
+                transformer_kwh = rows[0].input_kwh
+        downstream = []
+        for series in [target, *candidates]:
+            matches = [
+                point.kwh
+                for point in series.readings
+                if point.timestamp == event_time and point.kwh is not None
+            ]
+            if len(matches) == 1:
+                downstream.append(matches[0])
+        return EnergyBalanceInput(
+            run_id=run_id,
+            transformer_id=profile.transformer_id,
+            event_time=event_time,
+            transformer_kwh=transformer_kwh,
+            downstream_kwh=downstream,
+        )
+
+    @staticmethod
+    def _weather_alignment(
+        weather: WeatherContextOutput,
+        *,
+        event_time: datetime,
+        actual_kwh: float | None,
+        expected_kwh: float | None,
+    ) -> dict[str, Any]:
+        if weather.status != "answered" or actual_kwh is None or expected_kwh is None:
+            return {
+                "status": "unknown",
+                "reason": "Weather observations or expected/actual usage are unavailable.",
+            }
+        frame = pd.DataFrame(
+            {
+                "DateTime": [item.timestamp for item in weather.observations],
+                "temperature_c": [item.temperature_c for item in weather.observations],
+            }
+        )
+        return cast(
+            dict[str, Any],
+            analyze_weather_alignment(
+                frame,
+                event_time,
+                actual_kwh,
+                expected_kwh,
+                weather_mode="online",
+            ),
+        )
 
     def _candidate_series(
         self, profile: MeterProfileOutput, start: datetime, end: datetime
@@ -883,6 +1393,11 @@ class InvestigationService:
         precedents: PrecedentOutput,
         weather: WeatherContextOutput,
         knowledge: KnowledgeSearchOutput,
+        forecast: ForecastOutput,
+        energy_balance: EnergyBalanceOutput,
+        customer_der: CustomerDerOutput,
+        revenue: RevenueRiskOutput,
+        triage: TriageOutput,
     ) -> list[EvidenceDraft]:
         return [
             EvidenceDraft(
@@ -939,6 +1454,46 @@ class InvestigationService:
                 source="database.document_chunks",
                 value=knowledge.model_dump(mode="json", exclude={"evidence"}),
                 reliability=0.85 if knowledge.status == "answered" else 0,
+                observed_at=event_time,
+            ),
+            EvidenceDraft(
+                key="forecast",
+                kind="expected_usage_forecast",
+                source="forecast_expected_usage",
+                value=forecast.model_dump(mode="json", exclude={"evidence"}),
+                reliability=forecast.evidence[0].reliability if forecast.evidence else 0,
+                observed_at=event_time,
+            ),
+            EvidenceDraft(
+                key="energy_balance",
+                kind="energy_balance",
+                source="calculate_energy_balance",
+                value=energy_balance.model_dump(mode="json", exclude={"evidence"}),
+                reliability=energy_balance.confidence,
+                observed_at=event_time,
+            ),
+            EvidenceDraft(
+                key="customer_der",
+                kind="customer_der_context",
+                source="analyze_customer_der_context",
+                value=customer_der.model_dump(mode="json", exclude={"evidence"}),
+                reliability=0.7 if customer_der.status == "answered" else 0,
+                observed_at=event_time,
+            ),
+            EvidenceDraft(
+                key="revenue_risk",
+                kind="financial_impact",
+                source="estimate_revenue_at_risk",
+                value=revenue.model_dump(mode="json", exclude={"evidence"}),
+                reliability=revenue.confidence,
+                observed_at=event_time,
+            ),
+            EvidenceDraft(
+                key="triage",
+                kind="triage_priority",
+                source="calculate_triage_priority",
+                value=triage.model_dump(mode="json", exclude={"evidence"}),
+                reliability=quality.quality_score / 100,
                 observed_at=event_time,
             ),
         ]
