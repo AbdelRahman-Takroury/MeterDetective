@@ -1,30 +1,96 @@
-# MeterDetective
-This is a shared repository for the AI-agents Hackathon project: Meter Detective 
-# 🕵️‍♂️ MeterDetective: AI-Powered Grid Analyzer
+# MeterDetective AI
 
-An autonomous AI Data Engineer Agent built for the hackathon to analyze electricity grid data, detect sudden consumption anomalies, and calculate financial impacts using the ReAct (Reasoning and Acting) framework.
+Smart-meter anomaly investigation platform. This Day 1-B scaffold freezes the backend,
+database, event, tool, agent-state, and 18-question report contracts.
 
-## 🧠 System Architecture (ReAct Agent)
-The core of MeterDetective is an autonomous agent powered by **Groq API (llama-3.3-70b-versatile)**. Instead of answering directly, the agent uses a thought loop to fetch real-world data, analyze it, and draw conclusions:
-1. **Thought:** The agent understands the objective.
-2. **Action:** It calls specific Python tools (`pandas`, `json`).
-3. **Observation:** It reads the output of the tools.
-4. **Final Answer:** It synthesizes a highly professional executive report.
+## Start with Docker
 
-## 🛠️ Available Tools (Function Calling)
-- `get_transformer_data`: Fetches and aggregates half-hourly readings into daily averages to optimize LLM context limits (Tokens). Includes an injected 70% anomaly on `2012-06-05` for demo purposes.
-- `get_tariff_info`: Retrieves Jordanian electricity tariff brackets (JOD).
-- `get_historical_alerts`: Cross-references sudden drops with maintenance tickets (e.g., Voltage Drops, Tampering).
+```bash
+cp .env.example .env
+docker compose up --build
+```
 
-## 🗂️ Project Structure
-- `agent.py`: The main ReAct Loop engine.
-- `test_reproducibility.py`: Generates an MD5 hash of the dataset to prove 100% deterministic data generation (Hackathon Requirement).
-- `transformer_readings.csv`: The aggregated consumption data.
-- `jod_tariff.json`: Pricing brackets.
-- `historical_alerts.csv`: Mocked SCADA/Maintenance logs.
+Open `http://localhost:8000/api/health` or the interactive API documentation at
+`http://localhost:8000/docs`. The API container applies migrations before it starts.
 
-## 🚀 How to Run
-1. Install dependencies: `pip install pandas groq`
-2. Add your API Key in `agent.py`
-3. Run the Agent: `python agent.py`
-4. Run the reproducibility test: `python test_reproducibility.py`
+The first read APIs are `GET /api/meters`, `GET /api/meters/{meter_id}`,
+`GET /api/meters/{meter_id}/readings?start=...&end=...`, and `GET /api/cases`.
+List routes accept `offset` and `limit`; cases may be filtered by `status`. Reading
+windows use timezone-aware timestamps with an inclusive `start` and exclusive `end`.
+Unknown meters return 404, invalid query values return 422, and database failures return
+sanitized 503/500 errors. These routes are read-only; creating investigations remains future work.
+Each HTTP response also has an `X-Request-ID` header. A safe caller-supplied ID is echoed;
+otherwise the API generates a UUID. Request completion and failures are logged as JSON with the
+ID, method, path, status, and duration. Query strings, request bodies, and driver error text are
+not logged. Uvicorn access logs are disabled to avoid duplicate plaintext request lines.
+
+## Repeatable seed/import
+
+For a quick database smoke test, rebuild the API after pulling these changes and import the
+committed synthetic fixture:
+
+```bash
+docker compose up --build -d api
+docker compose exec api python -m app.seed
+docker compose exec api python -m app.seed
+```
+
+The second run should report `inserted: 0` for every table. The fixture contains 3 assets,
+3 meters, 6 readings, 2 transformer readings, 1 event, 1 anomaly, 1 case, 1 case-meter link,
+and 1 tariff.
+
+Developer A's published fixture is now included at `data/fixtures/developer_a`. Prepare it
+from the host project directory, then import it into the running API container:
+
+```bash
+uv run --python 3.12 --isolated python -m app.prepare_developer_a --source-dir data/fixtures/developer_a
+docker compose up --build -d api
+docker compose exec api python -m app.seed --manifest data/processed/developer_a/manifest.json
+```
+
+This published fixture is the one already imported in the Day 2-B Docker smoke test: 10 assets,
+160 meters, 213,710 readings, 8,646 transformer readings, 15 events, 15 cases, 399 case-meter
+links, and 3 tariffs. Preparation writes normalized CSVs and a manifest to the ignored
+`data/processed/developer_a` directory, which Compose mounts read-only into the API container.
+Run the import command again to verify idempotency. It rejects a reused natural key with
+different values and rolls back the whole import.
+
+The separate deterministic rebuild starts from Developer A's raw LCL source and recreates
+synthetic topology, metadata, readings, transformer totals, tickets, and anomaly scenarios:
+
+```bash
+uv run --python 3.12 --isolated python -m app.rebuild_developer_a
+uv run --python 3.12 --isolated python -m experiments.developer_a_agent --offline
+```
+
+The rebuild's import manifest is at `data/processed/rebuilt_developer_a/import/manifest.json`.
+Its scenario labels are held outside the API-mounted directory, at
+`data/evaluation/rebuilt_developer_a/ground_truth.csv`. The published fixture and rebuild are
+intentionally separate datasets; rebuilding does not change the already-imported records.
+See [docs/developer_a_integration.md](docs/developer_a_integration.md) for provenance and caveats.
+
+Developer A's timestamps have no timezone, so preparation interprets them as UTC. Its tariff
+has three consumption brackets; the current flat-rate tariff table stores one row per bracket,
+with the bracket range in the name. The fixed charge remains in the source JSON for later
+tariff-calculation work.
+
+The manifest format is `{"format_version": 1, "tables": {"meters": [...], "readings":
+{"file": "readings.csv"}}}`. Table rows can be inline JSON or a relative CSV/JSON file.
+Asset rows must be ordered parent-first. Supported tables are listed in `app/seed.py`.
+
+## Local development
+
+Python 3.12 and [uv](https://docs.astral.sh/uv/) are required.
+
+```bash
+uv sync
+uv run pytest
+uv run ruff check .
+uv run uvicorn app.main:app --reload
+```
+
+For a local API process, set `DATABASE_URL` to use `localhost` instead of the Compose
+service name `db`. Copy `.env.example` to `.env` and change only that host.
+
+See [docs/architecture.md](docs/architecture.md) and [docs/contracts.md](docs/contracts.md)
+for the frozen Day 1 contracts.
