@@ -1,6 +1,6 @@
 """Paged queue projection; batch joins avoid per-case detail requests."""
 
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import func, select
@@ -18,9 +18,23 @@ def queue(
     db: Annotated[Session, Depends(get_db)],
     offset: Annotated[int, Query(ge=0)] = 0,
     limit: Annotated[int, Query(ge=1, le=500)] = 100,
+    view: Annotated[Literal["investigations", "history", "all"], Query()] = "investigations",
 ) -> QueueResponse:
+    has_report = select(models.InvestigationReport.id).where(
+        models.InvestigationReport.case_id == models.Case.id
+    ).exists()
+    predicate = (
+        has_report
+        if view == "investigations"
+        else ~has_report
+        if view == "history"
+        else None
+    )
+    case_query = select(models.Case)
+    if predicate is not None:
+        case_query = case_query.where(predicate)
     cases = list(db.scalars(
-        select(models.Case).order_by(
+        case_query.order_by(
             models.Case.priority_band.asc().nulls_last(),
             models.Case.active_rank.asc().nulls_last(),
             models.Case.triage_score.desc().nulls_last(),
@@ -73,6 +87,22 @@ def queue(
                              if answers.get(17, {}).get("status") == "answered" else None),
             recommendation_status=recommendation.status if recommendation else None,
         ))
-    return QueueResponse(items=items, total=db.scalar(
-        select(func.count()).select_from(models.Case)
-    ) or 0, offset=offset, limit=limit)
+    investigated_total = db.scalar(
+        select(func.count()).select_from(models.Case).where(has_report)
+    ) or 0
+    legacy_total = db.scalar(
+        select(func.count()).select_from(models.Case).where(~has_report)
+    ) or 0
+    filtered_total = (
+        investigated_total if view == "investigations"
+        else legacy_total if view == "history"
+        else investigated_total + legacy_total
+    )
+    return QueueResponse(
+        items=items,
+        total=filtered_total,
+        investigated_total=investigated_total,
+        legacy_total=legacy_total,
+        offset=offset,
+        limit=limit,
+    )

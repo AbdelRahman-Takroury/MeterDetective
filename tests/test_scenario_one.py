@@ -73,6 +73,16 @@ def test_scenario_one_three_resets_rejection_repair_and_resolution(
     assert first_detail["financial_impact"] is not None
     assert first_detail["triage_assessment"] is not None
     assert first_detail["scenario"]["id"] == SCENARIO_ID
+    operational_queue = client.get("/api/triage/queue").json()
+    assert operational_queue["total"] == 1
+    assert operational_queue["investigated_total"] == 1
+    assert operational_queue["legacy_total"] == 1
+    assert operational_queue["items"][0]["id"] == first_case
+    assert operational_queue["items"][0]["present_count"] == 18
+    historical_queue = client.get("/api/triage/queue?view=history").json()
+    assert historical_queue["total"] == 1
+    assert historical_queue["items"][0]["id"] == str(legacy_id)
+    assert historical_queue["items"][0]["report_version"] is None
     recommendation_id, action_id = _recommendation(first_detail)
     blocked = client.post(
         f"/api/actions/{action_id}/execute-simulation", json={"result": {}}

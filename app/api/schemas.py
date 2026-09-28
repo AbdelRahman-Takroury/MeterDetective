@@ -83,6 +83,8 @@ class QueueItem(CaseSummary):
 class QueueResponse(BaseModel):
     items: list[QueueItem]
     total: int
+    investigated_total: int
+    legacy_total: int
     offset: int
     limit: int
 

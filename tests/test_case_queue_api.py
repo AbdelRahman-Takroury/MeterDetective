@@ -53,7 +53,9 @@ def test_queue_latest_report_ordering_and_missing_data():
             response = client.get("/api/triage/queue?limit=1")
             assert response.status_code == 200
             body = response.json()
-            assert body["total"] == 2
+            assert body["total"] == 1
+            assert body["investigated_total"] == 1
+            assert body["legacy_total"] == 1
             item = body["items"][0]
             assert item["priority_band"] == "P1"
             assert item["meter_ids"] == ["M-queue"]
@@ -61,11 +63,18 @@ def test_queue_latest_report_ordering_and_missing_data():
             assert item["report_version"] == 2
             assert item["answered_count"] == item["present_count"] == 2
             assert item["recommendation_status"] == "pending_approval"
-            second = client.get("/api/triage/queue?limit=1&offset=1").json()["items"][0]
+            assert client.get("/api/triage/queue?offset=1").json()["items"] == []
+
+            history = client.get("/api/triage/queue?view=history").json()
+            assert history["total"] == 1
+            second = history["items"][0]
             assert second["revenue_jod"] is None
             assert second["precedent_count"] is None
             assert second["report_version"] is None
-            assert client.get("/api/triage/queue?offset=2").json()["items"] == []
+            all_cases = client.get("/api/triage/queue?view=all").json()
+            assert all_cases["total"] == 2
+            assert len(all_cases["items"]) == 2
+            assert client.get("/api/triage/queue?view=invalid").status_code == 422
             assert client.get("/api/triage/queue?limit=0").status_code == 422
     finally:
         app.dependency_overrides.clear()
