@@ -25,6 +25,14 @@ class RepositoryNotFound(LookupError):
     """A requested parent record does not exist."""
 
 
+class WorkflowConflict(ValueError):
+    """A workflow transition is incompatible with the persisted state."""
+
+
+class ApprovalRequired(PermissionError):
+    """An action cannot execute because its recommendation is not approved."""
+
+
 def _utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         raise ValueError("Timestamps must include a timezone")
@@ -357,6 +365,234 @@ class HypothesisRepository:
         return hypothesis
 
 
+class WorkflowRepository:
+    """Persistence boundary for recommendation, approval, and simulated-action state."""
+
+    APPROVAL_RISKS = frozenset({"medium", "high", "critical"})
+    HIGH_IMPACT_ACTIONS = frozenset(
+        {
+            "technician_inspection",
+            "transformer_inspection",
+            "work_order",
+            "meter_repair",
+            "meter_replacement",
+        }
+    )
+    LOW_IMPACT_ACTIONS = frozenset({"continue_monitoring"})
+
+    def __init__(self, session: Session) -> None:
+        self.session = session
+
+    @classmethod
+    def approval_is_required(
+        cls, *, action_type: str, risk: str, requested: bool
+    ) -> bool:
+        normalized_action = action_type.strip().lower()
+        normalized_risk = risk.strip().lower()
+        return (
+            requested
+            or normalized_risk in cls.APPROVAL_RISKS
+            or normalized_action in cls.HIGH_IMPACT_ACTIONS
+            # New or unclassified actions default to the safe, approval-gated path.
+            or normalized_action not in cls.LOW_IMPACT_ACTIONS
+        )
+
+    def create_recommendation(
+        self,
+        *,
+        case_id: UUID,
+        action_type: str,
+        rationale: str,
+        risk: str,
+        requires_approval: bool,
+    ) -> tuple[models.Recommendation, models.Action]:
+        case = self.session.scalar(
+            select(models.Case).where(models.Case.id == case_id).with_for_update()
+        )
+        if case is None:
+            raise RepositoryNotFound("Case not found")
+        action_type = action_type.strip()
+        rationale = rationale.strip()
+        risk = risk.strip().lower()
+        if not action_type or not rationale or not risk:
+            raise ValueError("Recommendation fields cannot be blank")
+        gated = self.approval_is_required(
+            action_type=action_type, risk=risk, requested=requires_approval
+        )
+        recommendation = models.Recommendation(
+            case_id=case_id,
+            action_type=action_type,
+            rationale=rationale,
+            risk=risk,
+            requires_approval=gated,
+            status="pending_approval" if gated else "approved",
+        )
+        self.session.add(recommendation)
+        self.session.flush()
+        action = models.Action(
+            case_id=case_id,
+            recommendation_id=recommendation.id,
+            action_type=action_type,
+            status="awaiting_approval" if gated else "ready",
+            result_json={},
+        )
+        self.session.add(action)
+        self.session.flush()
+        case.status = "awaiting_approval" if gated else "action_ready"
+        now = datetime.now(UTC)
+        self.session.add(
+            models.CaseEvent(
+                case_id=case_id,
+                event_type="recommendation_created",
+                details_json={
+                    "recommendation_id": str(recommendation.id),
+                    "action_id": str(action.id),
+                    "action_type": action_type,
+                    "risk": risk,
+                    "requires_approval": gated,
+                },
+                created_at=now,
+            )
+        )
+        self.session.flush()
+        return recommendation, action
+
+    def get_recommendation(self, recommendation_id: UUID) -> models.Recommendation | None:
+        return self.session.get(models.Recommendation, recommendation_id)
+
+    def action_for_recommendation(self, recommendation_id: UUID) -> models.Action | None:
+        return self.session.scalar(
+            select(models.Action).where(models.Action.recommendation_id == recommendation_id)
+        )
+
+    def approval_for_recommendation(self, recommendation_id: UUID) -> models.Approval | None:
+        return self.session.scalar(
+            select(models.Approval).where(models.Approval.recommendation_id == recommendation_id)
+        )
+
+    def decide(
+        self,
+        recommendation_id: UUID,
+        *,
+        decision: str,
+        decided_by: str,
+        comment: str | None,
+    ) -> tuple[models.Recommendation, models.Approval, models.Action]:
+        if decision not in {"approved", "rejected"}:
+            raise ValueError("Decision must be approved or rejected")
+        recommendation = self.session.scalar(
+            select(models.Recommendation)
+            .where(models.Recommendation.id == recommendation_id)
+            .with_for_update()
+        )
+        if recommendation is None:
+            raise RepositoryNotFound("Recommendation not found")
+        action = self.action_for_recommendation(recommendation_id)
+        if action is None:
+            raise WorkflowConflict("Recommendation has no associated action")
+        existing = self.approval_for_recommendation(recommendation_id)
+        if existing is not None:
+            if existing.decision != decision:
+                raise WorkflowConflict(
+                    f"Recommendation was already {existing.decision}; decisions are final"
+                )
+            return recommendation, existing, action
+        if not recommendation.requires_approval:
+            raise WorkflowConflict("Recommendation does not require human approval")
+        if recommendation.status != "pending_approval" or action.status != "awaiting_approval":
+            raise WorkflowConflict("Recommendation is no longer awaiting approval")
+
+        now = datetime.now(UTC)
+        approval = models.Approval(
+            recommendation_id=recommendation.id,
+            decision=decision,
+            decided_by=decided_by.strip(),
+            decided_at=now,
+            comment=comment.strip() if comment else None,
+        )
+        self.session.add(approval)
+        recommendation.status = decision
+        action.status = "ready" if decision == "approved" else "rejected"
+        case = self.session.get(models.Case, recommendation.case_id)
+        if case is None:
+            raise RepositoryNotFound("Case not found")
+        case.status = "action_ready" if decision == "approved" else "monitoring"
+        self.session.add(
+            models.CaseEvent(
+                case_id=recommendation.case_id,
+                event_type="approval_decided",
+                details_json={
+                    "recommendation_id": str(recommendation.id),
+                    "action_id": str(action.id),
+                    "decision": decision,
+                    "decided_by": approval.decided_by,
+                    "comment": approval.comment,
+                },
+                created_at=now,
+            )
+        )
+        self.session.flush()
+        return recommendation, approval, action
+
+    def execute_simulation(
+        self, action_id: UUID, *, result: dict[str, Any]
+    ) -> tuple[models.Recommendation, models.Approval | None, models.Action]:
+        action = self.session.scalar(
+            select(models.Action).where(models.Action.id == action_id).with_for_update()
+        )
+        if action is None:
+            raise RepositoryNotFound("Action not found")
+        if action.status == "completed":
+            raise WorkflowConflict("Action simulation has already completed")
+        if action.status == "rejected":
+            raise ApprovalRequired("Rejected actions cannot be executed")
+        if action.recommendation_id is None:
+            raise ApprovalRequired("Action is not linked to a recommendation")
+        recommendation = self.get_recommendation(action.recommendation_id)
+        if recommendation is None or recommendation.case_id != action.case_id:
+            raise WorkflowConflict("Action recommendation is invalid")
+        if action.action_type != recommendation.action_type:
+            raise WorkflowConflict("Action type does not match its recommendation")
+        approval = self.approval_for_recommendation(recommendation.id)
+        action_requires_approval = self.approval_is_required(
+            action_type=action.action_type,
+            risk=recommendation.risk,
+            requested=recommendation.requires_approval,
+        )
+        if action_requires_approval and (
+            approval is None or approval.decision != "approved"
+        ):
+            raise ApprovalRequired("Action requires an approved recommendation")
+        if action.status != "ready":
+            raise WorkflowConflict(f"Action in status '{action.status}' cannot execute")
+
+        now = datetime.now(UTC)
+        action.status = "completed"
+        action.result_json = result
+        action.executed_at = now
+        recommendation.status = "executed"
+        case = self.session.get(models.Case, action.case_id)
+        if case is None:
+            raise RepositoryNotFound("Case not found")
+        case.status = "pending_verification"
+        self.session.add(
+            models.CaseEvent(
+                case_id=action.case_id,
+                event_type="action_completed",
+                details_json={
+                    "recommendation_id": str(recommendation.id),
+                    "action_id": str(action.id),
+                    "action_type": action.action_type,
+                    "simulation": True,
+                    "result": result,
+                },
+                created_at=now,
+            )
+        )
+        self.session.flush()
+        return recommendation, approval, action
+
+
 class TariffRepository:
     def __init__(self, session: Session) -> None:
         self.session = session
@@ -424,7 +660,19 @@ class RankingRepository:
         self.session = session
 
     def active_cases(
-        self, *, statuses: tuple[str, ...] = ("open", "investigating", "triaged"), limit: int = 100
+        self,
+        *,
+        statuses: tuple[str, ...] = (
+            "open",
+            "investigating",
+            "triaged",
+            "awaiting_approval",
+            "action_ready",
+            "pending_verification",
+            "monitoring",
+            "reopened",
+        ),
+        limit: int = 100,
     ) -> list[models.Case]:
         if not 1 <= limit <= 500:
             raise ValueError("Invalid ranking limit")
