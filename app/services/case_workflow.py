@@ -23,6 +23,12 @@ from app.tools.analytics import (
     ReadingPoint,
 )
 from app.tools.registry import ToolRegistry
+from app.tools.verification import (
+    ObservationWindowResult,
+    PeerAgreementResult,
+    ReturnToBaselineResult,
+    summarize_verification,
+)
 from app.tools.workflow import (
     ProposeActionInput,
     ProposeActionOutput,
@@ -334,6 +340,47 @@ class CaseWorkflowService:
             peer_fraction is None
             or peer_fraction >= settings.verification_peer_pass_fraction
         )
+        window_signal = ObservationWindowResult(
+            status="ready" if enough and quality.reliable else "not_ready",
+            expected_count=settings.verification_minimum_observations,
+            usable_count=valid_count,
+            reason=(
+                "The aggregate observation policy has enough reliable readings."
+                if enough and quality.reliable
+                else "The aggregate observation policy lacks enough reliable readings."
+            ),
+        )
+        baseline_signal = ReturnToBaselineResult(
+            status="unknown" if not enough else "pass" if baseline_pass else "fail",
+            reason=(
+                "Baseline recovery could not be evaluated."
+                if not enough
+                else "The required fraction of observations returned to baseline."
+                if baseline_pass
+                else "Too few observations returned to baseline."
+            ),
+        )
+        peer_signal = PeerAgreementResult(
+            status=(
+                "unknown"
+                if peer_fraction is None
+                else "pass"
+                if peer_pass
+                else "fail"
+            ),
+            reason=(
+                "Peer evidence is unavailable."
+                if peer_fraction is None
+                else "The required fraction of observations agrees with peers."
+                if peer_pass
+                else "Too few observations agree with peers."
+            ),
+        )
+        deterministic = summarize_verification(
+            window=window_signal,
+            baseline=baseline_signal,
+            peer=peer_signal,
+        )
         warnings = []
         if not enough:
             outcome = "insufficient_observations"
@@ -367,6 +414,13 @@ class CaseWorkflowService:
                 valid_count / max(settings.verification_minimum_observations, 1),
             ),
             policy_version=settings.verification_policy_version,
+            deterministic_status=deterministic.status,
+            component_statuses={
+                "window": deterministic.window_status,
+                "baseline": deterministic.baseline_status,
+                "peer": deterministic.peer_status,
+            },
+            deterministic_reason=deterministic.reason,
             warnings=warnings,
         )
         revenue = self._remaining_revenue(

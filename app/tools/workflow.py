@@ -60,6 +60,11 @@ class VerificationMetrics(ToolOutput):
     median_deviation_fraction: float | None = Field(default=None, ge=0)
     confidence: float = Field(ge=0, le=1)
     policy_version: str
+    deterministic_status: Literal[
+        "verified", "not_verified", "insufficient_evidence"
+    ]
+    component_statuses: dict[str, str]
+    deterministic_reason: str
 
 
 class VerifyOutcomeInput(ToolInput):

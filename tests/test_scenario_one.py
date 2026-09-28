@@ -134,6 +134,12 @@ def test_scenario_one_three_resets_rejection_repair_and_resolution(
     )
     assert question_15["status"] == "answered"
     assert question_15["structured_values"]["outcome"] == "recovered"
+    assert question_15["structured_values"]["deterministic_status"] == "verified"
+    assert question_15["structured_values"]["component_statuses"] == {
+        "window": "ready",
+        "baseline": "pass",
+        "peer": "pass",
+    }
     assert any(item["event_type"] == "simulated_repair_applied"
                for item in resolved["case_events"])
 
