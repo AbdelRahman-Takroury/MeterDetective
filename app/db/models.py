@@ -6,6 +6,7 @@ from uuid import UUID, uuid4
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     JSON,
+    Boolean,
     CheckConstraint,
     DateTime,
     Float,
@@ -189,7 +190,12 @@ class Recommendation(IdMixin, Base):
     action_type: Mapped[str] = mapped_column(String(80))
     rationale: Mapped[str] = mapped_column(Text)
     risk: Mapped[str] = mapped_column(String(40))
+    requires_approval: Mapped[bool] = mapped_column(Boolean, default=True)
     status: Mapped[str] = mapped_column(String(30), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
 
 
 class Approval(IdMixin, Base):
@@ -199,14 +205,22 @@ class Approval(IdMixin, Base):
     decided_by: Mapped[str | None] = mapped_column(String(120))
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     comment: Mapped[str | None] = mapped_column(Text)
+    __table_args__ = (
+        UniqueConstraint("recommendation_id", name="uq_approval_recommendation"),
+        CheckConstraint("decision IN ('approved', 'rejected')", name="approval_decision_values"),
+    )
 
 
 class Action(IdMixin, Base):
     __tablename__ = "actions"
     case_id: Mapped[UUID] = mapped_column(ForeignKey("cases.id"), index=True)
+    recommendation_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("recommendations.id"), unique=True, index=True
+    )
     action_type: Mapped[str] = mapped_column(String(80))
     status: Mapped[str] = mapped_column(String(30), index=True)
     result_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     executed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 

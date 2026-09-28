@@ -101,6 +101,12 @@ from app.tools.weather import (
     WeatherContextInput,
     WeatherContextOutput,
 )
+from app.tools.workflow import (
+    ProposeActionInput,
+    ProposeActionOutput,
+    propose_action_for_approval,
+    verify_case_outcome,
+)
 
 
 class InvestigationFailure(RuntimeError):
@@ -230,7 +236,16 @@ def _recalculate_active_queue_history(
         previous_report = reports.latest(case.id)
         if previous_report is None:
             continue
-        previous_assessment = ranking.by_report(previous_report.id)
+        previous_assessment = session.scalar(
+            select(models.TriageAssessment)
+            .join(
+                models.InvestigationReport,
+                models.InvestigationReport.id == models.TriageAssessment.report_id,
+            )
+            .where(models.TriageAssessment.case_id == case.id)
+            .order_by(models.InvestigationReport.version.desc())
+            .limit(1)
+        )
         if previous_assessment is None:
             continue
         if (
@@ -298,7 +313,16 @@ def _recalculate_active_queue_history(
             {*triage_answer.get("data_sources", []), snapshot.source}
         )
 
-        previous_financial = finance.by_report(previous_report.id)
+        previous_financial = session.scalar(
+            select(models.FinancialImpact)
+            .join(
+                models.InvestigationReport,
+                models.InvestigationReport.id == models.FinancialImpact.report_id,
+            )
+            .where(models.FinancialImpact.case_id == case.id)
+            .order_by(models.InvestigationReport.version.desc())
+            .limit(1)
+        )
         report = reports.add_version(
             case_id=case.id,
             status=previous_report.status,
@@ -908,6 +932,8 @@ def build_registry(
     registry.register("calculate_anomaly_severity", lambda data, _: hybrid_severity_tool(data))
     registry.register("calculate_triage_priority", lambda data, _: triage_tool(data))
     registry.register("create_case_and_record_investigation", record_investigation)
+    registry.register("propose_action_for_approval", propose_action_for_approval)
+    registry.register("verify_case_outcome", verify_case_outcome)
     return registry
 
 
@@ -1285,15 +1311,46 @@ class InvestigationService:
                 ),
                 RecordInvestigationOutput,
             )
+            proposed_action = (
+                "transformer_inspection"
+                if shared.incident_type == "shared"
+                else "technician_inspection"
+            )
+            proposal_risk = (
+                "high"
+                if triage.band in {"P1", "P2"}
+                else "medium" if triage.band == "P3" else "low"
+            )
+            proposal = self._required(
+                "propose_action_for_approval",
+                ProposeActionInput(
+                    run_id=run.id,
+                    case_id=recorded.case_id,
+                    target_case_id=recorded.case_id,
+                    source_report_id=recorded.report_id,
+                    action_type=proposed_action,
+                    rationale=(
+                        "Shared-meter evidence warrants a simulated transformer inspection."
+                        if shared.incident_type == "shared"
+                        else "The isolated anomaly warrants a simulated technician inspection."
+                    ),
+                    risk=proposal_risk,
+                    requires_approval=True,
+                ),
+                ProposeActionOutput,
+            )
             run.case_id = recorded.case_id
             run.status = "succeeded"
             run.ended_at = datetime.now(UTC)
             run.state_json = {
                 "stage": "investigation_recorded",
                 "case_id": str(recorded.case_id),
-                "report_id": str(recorded.report_id),
+                "report_id": str(proposal.report_id),
                 "incident_type": shared.incident_type,
-                "completed_tools": 20,
+                "recommendation_id": str(proposal.recommendation_id),
+                "action_id": str(proposal.action_id),
+                "approval_status": "pending",
+                "completed_tools": 21,
             }
             event.status = "completed"
             self.session.flush()
@@ -1301,10 +1358,10 @@ class InvestigationService:
                 event_id=event.id,
                 run_id=run.id,
                 case_id=recorded.case_id,
-                report_id=recorded.report_id,
+                report_id=proposal.report_id,
                 status="case_created",
                 anomaly_count=len(anomaly.events),
-                tool_calls=20,
+                tool_calls=21,
             )
         except Exception as exc:
             run.status = "failed"

@@ -1,10 +1,12 @@
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from pathlib import Path
 from time import perf_counter
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
 
 from app.api.router import api_router
@@ -28,6 +30,13 @@ settings = get_settings()
 configure_logging()
 app = FastAPI(title=settings.app_name, debug=settings.app_debug, lifespan=lifespan)
 app.include_router(api_router)
+frontend = Path(__file__).resolve().parent.parent / "frontend"
+app.mount("/static", StaticFiles(directory=frontend), name="dashboard-assets")
+
+
+@app.get("/", include_in_schema=False)
+def dashboard() -> FileResponse:
+    return FileResponse(frontend / "index.html")
 
 
 def _log_path(request: Request) -> str:

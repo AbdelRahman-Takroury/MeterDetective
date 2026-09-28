@@ -1,5 +1,39 @@
 # MeterDetective AI
 
+## Case workspace
+
+Open `http://localhost:8000/` after starting the API to use the case queue and detail pages.
+The dashboard is served by FastAPI with no frontend build or external CDN dependencies.
+The operational queue refreshes every ten seconds while visible; search, filters, and sort
+apply across investigated cases. Imported records without an investigation report are kept
+in the separate **Historical cases** view. They remain available for precedent matching, but
+the UI does not pretend that they contain an 18-question agent report. Click an investigated
+case to inspect its report, evidence, hypotheses, citations, financial exposure, history, and
+tool trace.
+
+Pending recommendations have approve/reject controls. The operator name is an audit label,
+not authentication. Approved actions can be recorded as simulations; this endpoint currently
+records the action without modifying readings. Verify a completed action using an explicit
+UTC observation window. The backend remains responsible for all approval and verification rules.
+Missing data is shown as unknown; report coverage and answered counts are displayed separately.
+The reading chart shows the first affected meter for the 48-hour incident window.
+
+`GET /api/triage/queue?offset=0&limit=100&view=investigations` returns paged report-backed
+case summaries by default. Use `view=history` for imported cases without reports, or
+`view=all` for both. Every response includes the investigated and historical totals.
+
+Use **Reset & run Scenario 1** in the queue, or call `POST /api/replay/reset`, to replace only
+the deterministic `SC1-*` synthetic slice and run a fresh local-drop investigation. Imported and
+unrelated cases are preserved. The generated case contains all 18 question slots, evidence,
+hypotheses, financial impact, triage, a recommendation, and a tool trace. After approval,
+**Apply simulated repair** inserts four target/peer observation intervals and supplies the exact
+UTC verification window. Verification should resolve the case and version Question 15 from
+`pending_verification` to an evidence-backed `recovered` result.
+
+Cases imported without an agent investigation are labeled as historical imports in the detail
+screen. Their missing answers are not fabricated; the screen explains that no investigation
+report exists instead of presenting 18 misleading empty question panels.
+
 Smart-meter anomaly investigation platform. This Day 1-B scaffold freezes the backend,
 database, event, tool, agent-state, and 18-question report contracts.
 

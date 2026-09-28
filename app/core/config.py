@@ -22,6 +22,11 @@ class Settings(BaseSettings):
     llm_api_key: str | None = None
     llm_model: str = ""
     llm_timeout_seconds: float = 10.0
+    verification_minimum_observations: int = 4
+    verification_baseline_pass_fraction: float = 0.75
+    verification_peer_pass_fraction: float = 0.75
+    verification_peer_tolerance_fraction: float = 0.20
+    verification_policy_version: str = "day6-v1"
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

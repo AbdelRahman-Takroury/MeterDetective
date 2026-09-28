@@ -12,10 +12,11 @@ from sqlalchemy.pool import StaticPool
 
 from app.db import models
 from app.db.base import Base
-from app.db.repositories import HypothesisRepository
+from app.db.repositories import HypothesisRepository, WorkflowRepository
 from app.db.session import get_db
 from app.main import app
 from app.services import investigation as investigation_module
+from app.services.case_workflow import CaseWorkflowService
 from app.services.investigation import InvestigationService, ReplayCommand, build_registry
 from app.tools import advanced
 from app.tools.advanced_analytics import (
@@ -138,9 +139,9 @@ def test_replay_creates_one_inspectable_case_and_is_idempotent(session: Session)
     assert first.status == "case_created"
     assert first.case_id is not None
     assert first.report_id is not None
-    assert first.tool_calls == 20
+    assert first.tool_calls == 21
     assert session.scalar(select(func.count()).select_from(models.AgentRun)) == 1
-    assert session.scalar(select(func.count()).select_from(models.ToolExecution)) == 20
+    assert session.scalar(select(func.count()).select_from(models.ToolExecution)) == 21
     assert session.scalar(select(func.count()).select_from(models.Case)) == 1
 
     report = session.get(models.InvestigationReport, first.report_id)
@@ -179,6 +180,163 @@ def test_replay_creates_one_inspectable_case_and_is_idempotent(session: Session)
     assert second.case_id == first.case_id
     assert session.scalar(select(func.count()).select_from(models.Case)) == 1
 
+
+def _complete_action(session: Session, case_id) -> models.Action:  # noqa: ANN001
+    recommendation = session.scalar(
+        select(models.Recommendation).where(models.Recommendation.case_id == case_id)
+    )
+    assert recommendation is not None
+    workflow = WorkflowRepository(session)
+    workflow.decide(
+        recommendation.id,
+        decision="approved",
+        decided_by="operator@example.com",
+        comment="Approved for verification test",
+    )
+    action = workflow.action_for_recommendation(recommendation.id)
+    assert action is not None
+    workflow.execute_simulation(action.id, result={"simulation": "repair_applied"})
+    session.commit()
+    return action
+
+
+def _add_post_action_readings(
+    session: Session, *, event_time: datetime, target_kwh: float, count: int = 4
+) -> tuple[datetime, datetime]:
+    start = event_time + timedelta(minutes=30)
+    for index in range(count):
+        timestamp = start + timedelta(minutes=30 * index)
+        session.add_all(
+            [
+                models.Reading(
+                    meter_id="M1",
+                    timestamp=timestamp,
+                    kwh=target_kwh + index * 0.02,
+                    quality_flag="valid",
+                    source="post-action-test",
+                ),
+                models.Reading(
+                    meter_id="M2",
+                    timestamp=timestamp,
+                    kwh=10.4,
+                    quality_flag="valid",
+                    source="post-action-test",
+                ),
+                models.Reading(
+                    meter_id="M3",
+                    timestamp=timestamp,
+                    kwh=10.8,
+                    quality_flag="valid",
+                    source="post-action-test",
+                ),
+            ]
+        )
+    session.commit()
+    return start, start + timedelta(minutes=30 * count)
+
+
+def test_verify_case_outcome_resolves_recovered_case_and_versions_question_15(
+    session: Session,
+) -> None:
+    event_time = seed_scenario(session)
+    replay = InvestigationService(session).replay(
+        ReplayCommand(meter_id="M1", event_time=event_time)
+    )
+    session.commit()
+    action = _complete_action(session, replay.case_id)
+    start, end = _add_post_action_readings(
+        session, event_time=event_time, target_kwh=10.0
+    )
+
+    result = CaseWorkflowService(session, build_registry()).verify(
+        case_id=replay.case_id,
+        action_id=action.id,
+        window_start=start,
+        window_end=end,
+    )
+    session.commit()
+
+    assert result.outcome == "recovered"
+    assert result.case_status == "resolved"
+    assert result.replan_required is False
+    report = session.get(models.InvestigationReport, result.report_id)
+    assert report is not None and report.status == "complete"
+    question_15 = next(item for item in report.answers_json if item["question_id"] == 15)
+    assert question_15["status"] == "answered"
+    assert question_15["structured_values"]["outcome"] == "recovered"
+    assert question_15["supporting_evidence"]
+    question_18 = next(item for item in report.answers_json if item["question_id"] == 18)
+    assert question_18["status"] == "not_applicable"
+    version_count = session.scalar(
+        select(func.count())
+        .select_from(models.InvestigationReport)
+        .where(models.InvestigationReport.case_id == replay.case_id)
+    )
+    repeated = CaseWorkflowService(session, build_registry()).verify(
+        case_id=replay.case_id,
+        action_id=action.id,
+        window_start=start,
+        window_end=end,
+    )
+    assert repeated.report_id == result.report_id
+    assert session.scalar(
+        select(func.count())
+        .select_from(models.InvestigationReport)
+        .where(models.InvestigationReport.case_id == replay.case_id)
+    ) == version_count
+
+
+def test_verify_case_outcome_reopens_persistent_case(session: Session) -> None:
+    event_time = seed_scenario(session)
+    replay = InvestigationService(session).replay(
+        ReplayCommand(meter_id="M1", event_time=event_time)
+    )
+    session.commit()
+    action = _complete_action(session, replay.case_id)
+    start, end = _add_post_action_readings(session, event_time=event_time, target_kwh=3.0)
+
+    result = CaseWorkflowService(session, build_registry()).verify(
+        case_id=replay.case_id,
+        action_id=action.id,
+        window_start=start,
+        window_end=end,
+    )
+    session.commit()
+
+    assert result.outcome == "persistent"
+    assert result.case_status == "reopened"
+    assert result.replan_required is True
+    report = session.get(models.InvestigationReport, result.report_id)
+    question_15 = next(item for item in report.answers_json if item["question_id"] == 15)
+    assert question_15["status"] == "answered"
+    assert question_15["structured_values"]["outcome"] == "persistent"
+
+
+def test_verify_case_outcome_waits_for_minimum_observation_window(session: Session) -> None:
+    event_time = seed_scenario(session)
+    replay = InvestigationService(session).replay(
+        ReplayCommand(meter_id="M1", event_time=event_time)
+    )
+    session.commit()
+    action = _complete_action(session, replay.case_id)
+    start, end = _add_post_action_readings(
+        session, event_time=event_time, target_kwh=10.0, count=1
+    )
+
+    result = CaseWorkflowService(session, build_registry()).verify(
+        case_id=replay.case_id,
+        action_id=action.id,
+        window_start=start,
+        window_end=end,
+    )
+    session.commit()
+
+    assert result.outcome == "insufficient_observations"
+    assert result.case_status == "monitoring"
+    report = session.get(models.InvestigationReport, result.report_id)
+    assert report is not None and report.status == "pending_verification"
+    question_15 = next(item for item in report.answers_json if item["question_id"] == 15)
+    assert question_15["status"] == "pending_verification"
 
 def test_active_queue_change_versions_triage_and_financial_history(session: Session) -> None:
     event_time = seed_scenario(session)
@@ -254,7 +412,7 @@ def test_active_queue_change_versions_triage_and_financial_history(session: Sess
             .order_by(models.InvestigationReport.version)
         )
     )
-    assert [item.version for item in versions] == [1, 2]
+    assert [item.version for item in versions] == [1, 2, 3]
     old_triage = session.scalar(
         select(models.TriageAssessment).where(
             models.TriageAssessment.report_id == versions[0].id
@@ -262,14 +420,14 @@ def test_active_queue_change_versions_triage_and_financial_history(session: Sess
     )
     new_triage = session.scalar(
         select(models.TriageAssessment).where(
-            models.TriageAssessment.report_id == versions[1].id
+            models.TriageAssessment.report_id == versions[2].id
         )
     )
     assert old_triage is not None and new_triage is not None
     assert old_triage.active_count == 1
     assert new_triage.active_count == 2
     assert new_triage.policy_version == old_triage.policy_version
-    updated_q18 = next(item for item in versions[1].answers_json if item["question_id"] == 18)
+    updated_q18 = next(item for item in versions[2].answers_json if item["question_id"] == 18)
     assert updated_q18["structured_values"]["active_count"] == 2
     assert updated_q18["fresh_as_of"] != versions[0].answers_json[17]["fresh_as_of"]
     assert session.scalar(
@@ -419,7 +577,7 @@ def test_replay_case_detail_and_trace_are_exposed_through_api() -> None:
             )
             assert replay.status_code == 200, replay.text
             replay_body = replay.json()
-            assert replay_body["tool_calls"] == 20
+            assert replay_body["tool_calls"] == 21
             case_id = replay_body["case_id"]
 
             detail = client.get(f"/api/cases/{case_id}")
@@ -431,7 +589,7 @@ def test_replay_case_detail_and_trace_are_exposed_through_api() -> None:
             trace = client.get(f"/api/cases/{case_id}/trace")
             assert trace.status_code == 200
             tools = trace.json()["runs"][0]["tools"]
-            assert len(tools) == 20
+            assert len(tools) == 21
             assert all(tool["status"] == "succeeded" for tool in tools)
     finally:
         app.dependency_overrides.clear()
