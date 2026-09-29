@@ -111,3 +111,7 @@
   .plain-facts { grid-template-columns:1fr; }
   .plain-facts dd { margin-bottom:7px; }
 }
+
+.support-score { flex:0 0 110px; text-align:right; }
+.support-score small { display:block; font-size:11px; font-weight:400; color:var(--muted); }
+.hypothesis-card details p { overflow-wrap:anywhere; }
