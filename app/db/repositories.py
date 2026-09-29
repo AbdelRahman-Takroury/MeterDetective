@@ -6,7 +6,7 @@ within the same transaction; they never commit independently.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
@@ -46,6 +46,26 @@ def _window(start: datetime, end: datetime, limit: int) -> tuple[datetime, datet
     if not 1 <= limit <= 10_000:
         raise ValueError("Limit must be between 1 and 10000")
     return start, end
+
+
+def _next_case_event_time(session: Session, case_id: UUID) -> datetime:
+    """Return a stable timestamp after the case's latest persisted event.
+
+    Windows clocks can return the same value for consecutive workflow requests.
+    Case history must follow the workflow, not a random UUID tie-breaker.
+    """
+    latest = session.scalar(
+        select(models.CaseEvent.created_at)
+        .where(models.CaseEvent.case_id == case_id)
+        .order_by(models.CaseEvent.created_at.desc())
+        .limit(1)
+    )
+    now = datetime.now(UTC)
+    if latest is None:
+        return now
+    if latest.tzinfo is None:
+        latest = latest.replace(tzinfo=UTC)
+    return max(now, latest.astimezone(UTC) + timedelta(microseconds=1))
 
 
 class MeterRepository:
@@ -457,7 +477,7 @@ class WorkflowRepository:
         self.session.add(action)
         self.session.flush()
         case.status = "awaiting_approval" if gated else "action_ready"
-        now = datetime.now(UTC)
+        now = _next_case_event_time(self.session, case_id)
         self.session.add(
             models.CaseEvent(
                 case_id=case_id,
@@ -520,7 +540,7 @@ class WorkflowRepository:
         if recommendation.status != "pending_approval" or action.status != "awaiting_approval":
             raise WorkflowConflict("Recommendation is no longer awaiting approval")
 
-        now = datetime.now(UTC)
+        now = _next_case_event_time(self.session, recommendation.case_id)
         approval = models.Approval(
             recommendation_id=recommendation.id,
             decision=decision,
@@ -584,7 +604,7 @@ class WorkflowRepository:
         if action.status != "ready":
             raise WorkflowConflict(f"Action in status '{action.status}' cannot execute")
 
-        now = datetime.now(UTC)
+        now = _next_case_event_time(self.session, action.case_id)
         action.status = "completed"
         action.result_json = result
         action.executed_at = now
