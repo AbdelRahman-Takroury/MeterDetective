@@ -1,13 +1,16 @@
 """Deterministic reading replay and investigation trigger."""
 
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
 from app.api.schemas import ReplayStepRequest, ReplayStepResponse, ScenarioResetResponse
+from app.db.repositories import RepositoryConflict
 from app.db.session import get_db
 from app.services.investigation import InvestigationFailure, InvestigationService, ReplayCommand
+from app.services.reading_events import IncomingReading, ReadingEventService
 from app.services.scenario_one import (
     EVENT_TIME,
     REPAIR_END,
@@ -16,9 +19,62 @@ from app.services.scenario_one import (
     TARGET_METER,
     ScenarioOneService,
 )
+from app.services.scenario_two import ScenarioTwoService
 
 router = APIRouter(prefix="/replay", tags=["replay"])
 DbSession = Annotated[Session, Depends(get_db)]
+
+
+class ReadingBatchRequest(BaseModel):
+    readings: list[IncomingReading] = Field(min_length=1, max_length=100)
+    model_config = ConfigDict(extra="forbid")
+
+
+class ScenarioTwoReplayRequest(BaseModel):
+    stage: Literal["normal", "initial", "shared"]
+    model_config = ConfigDict(extra="forbid")
+
+
+class ScenarioTwoResetResponse(BaseModel):
+    scenario_id: str
+    status: Literal["ready"]
+    message: str
+    reset_records: dict[str, int]
+
+
+@router.post("/readings", response_model=list[ReplayStepResponse])
+def receive_readings(request: ReadingBatchRequest, db: DbSession):
+    """Store readings and automatically investigate abnormal observations."""
+    try:
+        results = ReadingEventService(db).receive(request.readings)
+        db.commit()
+        return results
+    except (ValueError, RepositoryConflict, InvestigationFailure) as exc:
+        db.rollback()
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/scenario-2/reset", response_model=ScenarioTwoResetResponse)
+def reset_scenario_two(db: DbSession):
+    """Prepare only Scenario 2 history; investigation begins when readings arrive."""
+    removed = ScenarioTwoService(db).reset()
+    db.commit()
+    return {
+        "scenario_id": "scenario-2-shared-drop", "status": "ready",
+        "message": "Scenario 2 is ready. Play the initial readings to start.",
+        "reset_records": removed,
+    }
+
+
+@router.post("/scenario-2/replay", response_model=list[ReplayStepResponse])
+def replay_scenario_two(request: ScenarioTwoReplayRequest, db: DbSession):
+    try:
+        results = ScenarioTwoService(db).replay_stage(request.stage)
+        db.commit()
+        return results
+    except (ValueError, RepositoryConflict, InvestigationFailure) as exc:
+        db.rollback()
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.post("/reset", response_model=ScenarioResetResponse)

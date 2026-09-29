@@ -1,6 +1,7 @@
 """Recommendation, human-approval, and simulated-action workflow tests."""
 
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from uuid import UUID
 
 import pytest
@@ -9,7 +10,7 @@ from sqlalchemy import create_engine, event, select
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from app.db import models
+from app.db import models, repositories
 from app.db.base import Base
 from app.db.session import get_db
 from app.main import app
@@ -46,6 +47,8 @@ def workflow_client() -> Iterator[tuple[TestClient, sessionmaker[Session]]]:
             models.CaseEvent.__table__,
             models.AgentRun.__table__,
             models.ToolExecution.__table__,
+            models.Event.__table__,
+            models.InvestigationPlan.__table__,
         ],
     )
     factory = sessionmaker(bind=engine, expire_on_commit=False)
@@ -129,7 +132,14 @@ def test_high_impact_recommendation_cannot_bypass_approval(
 
 def test_approval_allows_one_simulation_and_records_audit_state(
     workflow_client: tuple[TestClient, sessionmaker[Session]],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    class FrozenDateTime:
+        @classmethod
+        def now(cls, tz):  # noqa: ANN001, ANN206 - datetime-compatible test double
+            return datetime(2026, 9, 29, 12, tzinfo=tz or UTC)
+
+    monkeypatch.setattr(repositories, "datetime", FrozenDateTime)
     client, factory = workflow_client
     case_id = _case_id(factory)
     proposed = _propose(client, case_id)

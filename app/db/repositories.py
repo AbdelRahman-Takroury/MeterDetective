@@ -6,7 +6,7 @@ within the same transaction; they never commit independently.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
@@ -46,6 +46,26 @@ def _window(start: datetime, end: datetime, limit: int) -> tuple[datetime, datet
     if not 1 <= limit <= 10_000:
         raise ValueError("Limit must be between 1 and 10000")
     return start, end
+
+
+def _next_case_event_time(session: Session, case_id: UUID) -> datetime:
+    """Return a stable timestamp after the case's latest persisted event.
+
+    Windows clocks can return the same value for consecutive workflow requests.
+    Case history must follow the workflow, not a random UUID tie-breaker.
+    """
+    latest = session.scalar(
+        select(models.CaseEvent.created_at)
+        .where(models.CaseEvent.case_id == case_id)
+        .order_by(models.CaseEvent.created_at.desc())
+        .limit(1)
+    )
+    now = datetime.now(UTC)
+    if latest is None:
+        return now
+    if latest.tzinfo is None:
+        latest = latest.replace(tzinfo=UTC)
+    return max(now, latest.astimezone(UTC) + timedelta(microseconds=1))
 
 
 class MeterRepository:
@@ -275,7 +295,8 @@ class HistoryRepository:
         )
 
     def meter_cases(
-        self, meter_id: str, *, closed_only: bool = False, limit: int = 100
+        self, meter_id: str, *, closed_only: bool = False, limit: int = 100,
+        exclude_case_id: UUID | None = None,
     ) -> list[models.Case]:
         if not 1 <= limit <= 500:
             raise ValueError("Invalid history limit")
@@ -284,6 +305,8 @@ class HistoryRepository:
         )
         if closed_only:
             statement = statement.where(models.Case.status == "closed")
+        if exclude_case_id is not None:
+            statement = statement.where(models.Case.id != exclude_case_id)
         return list(
             self.session.scalars(
                 statement.order_by(models.Case.opened_at.desc(), models.Case.id).limit(limit)
@@ -401,6 +424,8 @@ class WorkflowRepository:
         self,
         *,
         case_id: UUID,
+        plan_id: UUID | None = None,
+        source_report_id: UUID | None = None,
         action_type: str,
         rationale: str,
         risk: str,
@@ -411,6 +436,14 @@ class WorkflowRepository:
         )
         if case is None:
             raise RepositoryNotFound("Case not found")
+        if plan_id is not None:
+            plan = self.session.get(models.InvestigationPlan, plan_id)
+            if plan is None or plan.case_id != case_id or plan.status != "active":
+                raise WorkflowConflict("Recommendation plan is not active for this case")
+        if source_report_id is not None:
+            report = self.session.get(models.InvestigationReport, source_report_id)
+            if report is None or report.case_id != case_id:
+                raise WorkflowConflict("Recommendation report does not belong to this case")
         action_type = action_type.strip()
         rationale = rationale.strip()
         risk = risk.strip().lower()
@@ -419,13 +452,17 @@ class WorkflowRepository:
         gated = self.approval_is_required(
             action_type=action_type, risk=risk, requested=requires_approval
         )
+        now = datetime.now(UTC)
         recommendation = models.Recommendation(
             case_id=case_id,
+            plan_id=plan_id,
+            source_report_id=source_report_id,
             action_type=action_type,
             rationale=rationale,
             risk=risk,
             requires_approval=gated,
             status="pending_approval" if gated else "approved",
+            created_at=now,
         )
         self.session.add(recommendation)
         self.session.flush()
@@ -435,11 +472,12 @@ class WorkflowRepository:
             action_type=action_type,
             status="awaiting_approval" if gated else "ready",
             result_json={},
+            created_at=now,
         )
         self.session.add(action)
         self.session.flush()
         case.status = "awaiting_approval" if gated else "action_ready"
-        now = datetime.now(UTC)
+        now = _next_case_event_time(self.session, case_id)
         self.session.add(
             models.CaseEvent(
                 case_id=case_id,
@@ -502,7 +540,7 @@ class WorkflowRepository:
         if recommendation.status != "pending_approval" or action.status != "awaiting_approval":
             raise WorkflowConflict("Recommendation is no longer awaiting approval")
 
-        now = datetime.now(UTC)
+        now = _next_case_event_time(self.session, recommendation.case_id)
         approval = models.Approval(
             recommendation_id=recommendation.id,
             decision=decision,
@@ -566,7 +604,7 @@ class WorkflowRepository:
         if action.status != "ready":
             raise WorkflowConflict(f"Action in status '{action.status}' cannot execute")
 
-        now = datetime.now(UTC)
+        now = _next_case_event_time(self.session, action.case_id)
         action.status = "completed"
         action.result_json = result
         action.executed_at = now

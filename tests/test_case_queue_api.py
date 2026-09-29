@@ -85,7 +85,10 @@ def test_dashboard_and_api_routes_coexist(client):
     response = client.get("/")
     assert response.status_code == 200
     assert '/static/app.js' in response.text
+    assert '/static/live.css' in response.text
+    assert 'Live Operations' in response.text
     assert client.get("/static/app.js").status_code == 200
     assert client.get("/static/styles.css").status_code == 200
+    assert client.get("/static/live.css").status_code == 200
     assert client.get("/openapi.json").status_code == 200
     assert client.get("/static/../.env").status_code == 404

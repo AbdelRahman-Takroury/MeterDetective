@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 from time import perf_counter
 from typing import Any, TypeVar
 
 from pydantic import ValidationError
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.contracts.common import RunStatus
@@ -72,8 +74,17 @@ class ToolRegistry:
             latency_ms=latency_ms,
             error=error,
         )
+        created_at = datetime.now(UTC)
+        previous_time = session.scalar(select(models.ToolExecution.created_at).where(
+            models.ToolExecution.run_id == tool_input.run_id
+        ).order_by(models.ToolExecution.created_at.desc()).limit(1))
+        if previous_time is not None:
+            if previous_time.tzinfo is None:
+                previous_time = previous_time.replace(tzinfo=UTC)
+            created_at = max(created_at, previous_time + timedelta(microseconds=1))
         session.add(
             models.ToolExecution(
+                created_at=created_at,
                 run_id=tool_input.run_id,
                 tool_name=name,
                 input_json=tool_input.model_dump(mode="json"),

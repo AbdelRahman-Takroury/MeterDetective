@@ -169,6 +169,17 @@ def case_detail(case_id: str, db: DbSession) -> CaseDetailResponse:
     collect_citations([item.value_json for item in evidence])
     collect_citations(report.answers_json if report else [])
     return CaseDetailResponse(
+        plans=[{
+            "id": str(plan.id), "version": plan.version, "status": plan.status,
+            "scope": plan.scope, "goal": plan.goal, "steps": plan.steps_json,
+            "evidence_ids": plan.evidence_ids_json,
+            "source_report_id": str(plan.source_report_id),
+            "source_event_id": str(plan.source_event_id),
+            "source_run_id": str(plan.source_run_id), "policy_version": plan.policy_version,
+            "created_at": plan.created_at, "invalidated_at": plan.invalidated_at,
+        } for plan in db.scalars(select(models.InvestigationPlan).where(
+            models.InvestigationPlan.case_id == parsed_id
+        ).order_by(models.InvestigationPlan.version))],
         case=CaseSummary.model_validate(case),
         meter_ids=meter_ids,
         evidence=[
@@ -218,6 +229,14 @@ def case_detail(case_id: str, db: DbSession) -> CaseDetailResponse:
         recommendations=[
             {
                 "id": str(item.id),
+                "plan_id": str(item.plan_id) if item.plan_id else None,
+                "source_report_id": (
+                    str(item.source_report_id) if item.source_report_id else None
+                ),
+                "superseded_by_id": (
+                    str(item.superseded_by_id) if item.superseded_by_id else None
+                ),
+                "superseded_at": item.superseded_at,
                 "action_type": item.action_type,
                 "rationale": item.rationale,
                 "risk": item.risk,

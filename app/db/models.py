@@ -17,6 +17,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql import func
@@ -187,6 +188,16 @@ class Hypothesis(IdMixin, Base):
 class Recommendation(IdMixin, Base):
     __tablename__ = "recommendations"
     case_id: Mapped[UUID] = mapped_column(ForeignKey("cases.id"), index=True)
+    plan_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("investigation_plans.id"), index=True
+    )
+    source_report_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("investigation_reports.id"), index=True
+    )
+    superseded_by_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("recommendations.id"), index=True
+    )
+    superseded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     action_type: Mapped[str] = mapped_column(String(80))
     rationale: Mapped[str] = mapped_column(Text)
     risk: Mapped[str] = mapped_column(String(40))
@@ -286,6 +297,33 @@ class InvestigationReport(IdMixin, Base):
             "completeness >= 0 AND completeness <= 1", name="report_completeness_range"
         ),
         Index("ix_investigation_reports_case_generated", "case_id", "generated_at"),
+    )
+
+
+class InvestigationPlan(IdMixin, Base):
+    __tablename__ = "investigation_plans"
+    case_id: Mapped[UUID] = mapped_column(ForeignKey("cases.id"), index=True)
+    version: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(20))
+    scope: Mapped[str] = mapped_column(String(20))
+    goal: Mapped[str] = mapped_column(Text)
+    steps_json: Mapped[list[str]] = mapped_column(JSON)
+    evidence_ids_json: Mapped[list[str]] = mapped_column(JSON)
+    source_report_id: Mapped[UUID] = mapped_column(ForeignKey("investigation_reports.id"))
+    source_event_id: Mapped[UUID] = mapped_column(ForeignKey("events.id"))
+    source_run_id: Mapped[UUID] = mapped_column(ForeignKey("agent_runs.id"))
+    policy_version: Mapped[str] = mapped_column(String(40))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    invalidated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    __table_args__ = (
+        UniqueConstraint("case_id", "version", name="uq_plan_case_version"),
+        CheckConstraint("version >= 1", name="plan_version_positive"),
+        CheckConstraint(
+            "status IN ('active', 'invalidated', 'superseded')", name="plan_status_values"
+        ),
+        CheckConstraint("scope IN ('local', 'shared', 'unknown')", name="plan_scope_values"),
+        Index("uq_plan_active_case", "case_id", unique=True,
+              postgresql_where=text("status = 'active'"), sqlite_where=text("status = 'active'")),
     )
 
 

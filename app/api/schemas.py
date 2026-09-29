@@ -120,6 +120,7 @@ class ScenarioResetResponse(BaseModel):
 
 
 class CaseDetailResponse(BaseModel):
+    plans: list[dict[str, Any]] = Field(default_factory=list)
     case: CaseSummary
     meter_ids: list[str]
     evidence: list[dict[str, Any]]
@@ -151,6 +152,10 @@ class RecommendationCreateRequest(BaseModel):
 class RecommendationResponse(OrmResponse):
     id: UUID
     case_id: UUID
+    plan_id: UUID | None
+    source_report_id: UUID | None
+    superseded_by_id: UUID | None
+    superseded_at: datetime | None
     action_type: str
     rationale: str
     risk: str

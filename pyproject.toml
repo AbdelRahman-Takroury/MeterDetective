@@ -27,7 +27,7 @@ dev = [
 ]
 
 [tool.pytest.ini_options]
-addopts = "-q --strict-markers --disable-warnings"
+addopts = "-q --strict-markers --disable-warnings --basetemp=.pytest-tmp"
 testpaths = ["tests"]
 pythonpath = ["."]
 
