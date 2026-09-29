@@ -275,7 +275,8 @@ class HistoryRepository:
         )
 
     def meter_cases(
-        self, meter_id: str, *, closed_only: bool = False, limit: int = 100
+        self, meter_id: str, *, closed_only: bool = False, limit: int = 100,
+        exclude_case_id: UUID | None = None,
     ) -> list[models.Case]:
         if not 1 <= limit <= 500:
             raise ValueError("Invalid history limit")
@@ -284,6 +285,8 @@ class HistoryRepository:
         )
         if closed_only:
             statement = statement.where(models.Case.status == "closed")
+        if exclude_case_id is not None:
+            statement = statement.where(models.Case.id != exclude_case_id)
         return list(
             self.session.scalars(
                 statement.order_by(models.Case.opened_at.desc(), models.Case.id).limit(limit)
@@ -401,6 +404,8 @@ class WorkflowRepository:
         self,
         *,
         case_id: UUID,
+        plan_id: UUID | None = None,
+        source_report_id: UUID | None = None,
         action_type: str,
         rationale: str,
         risk: str,
@@ -411,6 +416,14 @@ class WorkflowRepository:
         )
         if case is None:
             raise RepositoryNotFound("Case not found")
+        if plan_id is not None:
+            plan = self.session.get(models.InvestigationPlan, plan_id)
+            if plan is None or plan.case_id != case_id or plan.status != "active":
+                raise WorkflowConflict("Recommendation plan is not active for this case")
+        if source_report_id is not None:
+            report = self.session.get(models.InvestigationReport, source_report_id)
+            if report is None or report.case_id != case_id:
+                raise WorkflowConflict("Recommendation report does not belong to this case")
         action_type = action_type.strip()
         rationale = rationale.strip()
         risk = risk.strip().lower()
@@ -419,13 +432,17 @@ class WorkflowRepository:
         gated = self.approval_is_required(
             action_type=action_type, risk=risk, requested=requires_approval
         )
+        now = datetime.now(UTC)
         recommendation = models.Recommendation(
             case_id=case_id,
+            plan_id=plan_id,
+            source_report_id=source_report_id,
             action_type=action_type,
             rationale=rationale,
             risk=risk,
             requires_approval=gated,
             status="pending_approval" if gated else "approved",
+            created_at=now,
         )
         self.session.add(recommendation)
         self.session.flush()
@@ -435,6 +452,7 @@ class WorkflowRepository:
             action_type=action_type,
             status="awaiting_approval" if gated else "ready",
             result_json={},
+            created_at=now,
         )
         self.session.add(action)
         self.session.flush()

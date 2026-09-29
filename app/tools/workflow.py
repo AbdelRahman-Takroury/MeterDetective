@@ -29,6 +29,7 @@ from app.tools.advanced import RevenueRiskOutput
 class ProposeActionInput(ToolInput):
     target_case_id: UUID
     source_report_id: UUID
+    plan_id: UUID | None = None
     action_type: str = Field(min_length=1, max_length=80)
     rationale: str = Field(min_length=1, max_length=10_000)
     risk: str = Field(min_length=1, max_length=40)
@@ -117,6 +118,8 @@ def propose_action_for_approval(
     )
     recommendation, action = WorkflowRepository(session).create_recommendation(
         case_id=data.target_case_id,
+        plan_id=data.plan_id,
+        source_report_id=data.source_report_id,
         action_type=data.action_type,
         rationale=data.rationale,
         risk=data.risk,

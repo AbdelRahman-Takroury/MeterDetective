@@ -46,6 +46,8 @@ def workflow_client() -> Iterator[tuple[TestClient, sessionmaker[Session]]]:
             models.CaseEvent.__table__,
             models.AgentRun.__table__,
             models.ToolExecution.__table__,
+            models.Event.__table__,
+            models.InvestigationPlan.__table__,
         ],
     )
     factory = sessionmaker(bind=engine, expire_on_commit=False)

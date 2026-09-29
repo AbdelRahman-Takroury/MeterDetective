@@ -109,6 +109,7 @@ def get_reading_window(data: ReadingWindowInput, session: Session) -> ReadingWin
 
 class PrecedentInput(ToolInput):
     meter_id: str
+    exclude_case_id: UUID | None = None
     limit: int = Field(default=10, ge=1, le=100)
 
 
@@ -133,7 +134,9 @@ def find_meter_precedents(data: PrecedentInput, session: Session) -> PrecedentOu
     meter = MeterRepository(session).get(data.meter_id)
     if meter is None:
         raise ValueError("Meter not found")
-    exact_rows = HistoryRepository(session).meter_cases(data.meter_id, limit=data.limit)
+    exact_rows = HistoryRepository(session).meter_cases(
+        data.meter_id, limit=data.limit, exclude_case_id=data.exclude_case_id
+    )
     exact = [
         PrecedentCase(
             case_id=row.id,
@@ -159,6 +162,10 @@ def find_meter_precedents(data: PrecedentInput, session: Session) -> PrecedentOu
             .order_by(models.Case.updated_at.desc(), models.Case.id)
             .limit(data.limit)
         )
+        excluded = [item.case_id for item in exact]
+        if data.exclude_case_id:
+            excluded.append(data.exclude_case_id)
+        statement = statement.where(models.Case.id.not_in(excluded)).distinct()
         seen: set[UUID] = set()
         for row in session.scalars(statement):
             if row.id in seen:

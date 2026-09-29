@@ -4,6 +4,7 @@
 .uv-cache-check
 __pycache__
 .pytest_cache
+.pytest-tmp
 .ruff_cache
 .coverage
 .env
@@ -15,3 +16,4 @@ data/evaluation/*
 tests
 docs
 MeterDetective_AI_Project_Plan (1).md
+MeterDetective_Final_2_Day_Execution_Plan.md

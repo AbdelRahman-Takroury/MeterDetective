@@ -21,11 +21,13 @@ from app.db import models
 from app.db.repositories import (
     EventRepository,
     FinanceRepository,
+    HypothesisRepository,
     RankingRepository,
     ReadingRepository,
     ReportRepository,
     TariffRepository,
 )
+from app.services.plans import update_plan
 from app.tools.advanced import (
     AnalyticsEvidenceOutput,
     CustomerDerInput,
@@ -118,6 +120,7 @@ class ReplayCommand(ToolOutput):
     event_time: datetime
     lookback_days: int = Field(default=35, ge=7, le=90)
     idempotency_key: str | None = None
+    resume_existing: bool = False
 
 
 class ReplayResult(ToolOutput):
@@ -149,6 +152,8 @@ class HypothesisDraft(ToolOutput):
 
 class RecordInvestigationInput(ToolInput):
     target_case_id: UUID
+    resume_existing: bool = False
+    affected_meter_ids: list[str] = Field(default_factory=list)
     event_id: UUID
     meter_id: str
     anomaly_type: str
@@ -390,15 +395,24 @@ def record_investigation(
     if existing is not None:
         raise ValueError("Investigation already recorded for this event and anomaly")
 
-    case = models.Case(
-        id=data.target_case_id,
-        title=f"{data.anomaly_type.replace('_', ' ').title()} at {data.meter_id}",
-        status="investigating",
-        confidence=max((item.confidence for item in data.hypothesis_drafts), default=0),
-    )
+    case = session.get(models.Case, data.target_case_id) if data.resume_existing else None
+    if data.resume_existing and case is None:
+        raise ValueError("The investigation case is no longer available")
+    if case is None:
+        case = models.Case(
+            id=data.target_case_id,
+            title=f"{data.anomaly_type.replace('_', ' ').title()} at {data.meter_id}",
+            status="investigating",
+        )
+    case.confidence = max((item.confidence for item in data.hypothesis_drafts), default=0)
+    case.status = "investigating"
     session.add(case)
     session.flush()
-    session.add(models.CaseMeter(case_id=case.id, meter_id=data.meter_id, relationship="affected"))
+    for meter_id in {data.meter_id, *data.affected_meter_ids}:
+        if session.get(models.CaseMeter, (case.id, meter_id)) is None:
+            session.add(models.CaseMeter(
+                case_id=case.id, meter_id=meter_id, relationship="affected"
+            ))
     session.add(
         models.Anomaly(
             meter_id=data.meter_id,
@@ -433,6 +447,20 @@ def record_investigation(
         contradiction = [
             str(persisted[key].id) for key in draft.contradiction_keys if key in persisted
         ]
+        previous = session.scalar(select(models.Hypothesis).where(
+            models.Hypothesis.case_id == case.id,
+            models.Hypothesis.label == draft.label,
+        ))
+        if previous is not None:
+            row = HypothesisRepository(session).update_confidence(
+                previous.id,
+                confidence=draft.confidence,
+                reason="New readings received; investigation evidence reassessed.",
+                supporting_evidence_ids=[UUID(item) for item in support],
+                contradicting_evidence_ids=[UUID(item) for item in contradiction],
+            )
+            hypotheses.append(row)
+            continue
         row = models.Hypothesis(
             case_id=case.id,
             label=draft.label,
@@ -870,7 +898,10 @@ def record_investigation(
     session.add(
         models.CaseEvent(
             case_id=case.id,
-            event_type="investigation_recorded",
+            event_type=(
+                "investigation_resumed" if data.resume_existing else "investigation_recorded"
+            ),
+            created_at=datetime.now(UTC),
             details_json={
                 "event_id": str(data.event_id),
                 "report_id": str(report.id),
@@ -964,18 +995,23 @@ class InvestigationService:
                 run_id=run.id,
                 case_id=run.case_id,
                 report_id=UUID(report_id) if report_id else None,
-                status=run.status,
+                status=run.state_json.get("result_status", run.status),
+                anomaly_count=int(run.state_json.get("anomaly_count", 0)),
                 duplicate=True,
                 tool_calls=int(tool_calls or 0),
             )
         return None
 
     def replay(self, command: ReplayCommand) -> ReplayResult:
+        if command.event_time.tzinfo is None:
+            raise ValueError("Reading time must include a timezone")
         event_time = command.event_time.astimezone(UTC)
         key = command.idempotency_key or f"replay:{command.meter_id}:{event_time.isoformat()}"
         payload = {"meter_id": command.meter_id, "event_time": event_time.isoformat()}
         existing_event = EventRepository(self.session).get(key)
         if existing_event is not None:
+            if existing_event.payload_json != payload:
+                raise ValueError("This event identifier belongs to different readings")
             existing_result = self._existing_result(existing_event)
             if existing_result is not None:
                 return existing_result
@@ -988,6 +1024,7 @@ class InvestigationService:
         run = models.AgentRun(
             trigger={"event_id": str(event.id), **payload},
             status="running",
+            started_at=datetime.now(UTC),
             state_json={"stage": "started", "completed_tools": []},
         )
         self.session.add(run)
@@ -1033,6 +1070,8 @@ class InvestigationService:
                 run.ended_at = datetime.now(UTC)
                 run.state_json = {
                     "stage": "normal_stop",
+                    "result_status": "normal",
+                    "anomaly_count": 0,
                     "anomaly_status": anomaly.status,
                     "completed_tools": 5,
                 }
@@ -1171,9 +1210,20 @@ class InvestigationService:
                 ),
                 KnowledgeSearchOutput,
             )
+            affected_ids = [item.meter_id for item in shared.meter_results if item.affected]
+            relevant_case = (
+                self._relevant_case(command, selected_event.anomaly_type, affected_ids)
+                if command.resume_existing else None
+            )
+            provisional_case_id = relevant_case.id if relevant_case else uuid4()
+            if relevant_case is not None:
+                run.case_id = relevant_case.id
             precedents = self._required(
                 "find_meter_precedents",
-                PrecedentInput(run_id=run.id, meter_id=command.meter_id),
+                PrecedentInput(
+                    run_id=run.id, meter_id=command.meter_id,
+                    exclude_case_id=relevant_case.id if relevant_case else None,
+                ),
                 PrecedentOutput,
             )
             tariffs = (
@@ -1209,11 +1259,10 @@ class InvestigationService:
                 ),
                 RevenueRiskOutput,
             )
-            provisional_case_id = uuid4()
             active_queue = [
                 QueueCase(case_id=str(item.id), priority_score=item.triage_score)
                 for item in RankingRepository(self.session).active_cases()
-                if item.triage_score is not None
+                if item.triage_score is not None and item.id != provisional_case_id
             ]
             triage = self._required(
                 "calculate_triage_priority",
@@ -1273,12 +1322,37 @@ class InvestigationService:
             hypotheses = self._hypotheses(quality, shared)
             precedent_ids = [item.case_id for item in precedents.exact_meter_cases]
             precedent_ids.extend(item.case_id for item in precedents.similar_system_cases)
+            previous_report = None
+            previous_case_status = None
+            previous_workflows: list[tuple[models.Recommendation, models.Action]] = []
+            if relevant_case is not None:
+                previous_case_status = relevant_case.status
+                previous_report = self.session.scalar(
+                    select(models.InvestigationReport)
+                    .where(models.InvestigationReport.case_id == relevant_case.id)
+                    .order_by(models.InvestigationReport.version.desc())
+                )
+                previous_workflows = list(self.session.execute(
+                    select(models.Recommendation, models.Action)
+                    .join(
+                        models.Action,
+                        models.Action.recommendation_id == models.Recommendation.id,
+                    )
+                    .where(
+                        models.Recommendation.case_id == relevant_case.id,
+                        models.Recommendation.status.in_(["pending_approval", "approved"]),
+                        models.Action.status.in_(["awaiting_approval", "ready"]),
+                    )
+                    .order_by(models.Recommendation.created_at, models.Recommendation.id)
+                ).all())
             recorded = self._required(
                 "create_case_and_record_investigation",
                 RecordInvestigationInput(
                     run_id=run.id,
                     target_case_id=provisional_case_id,
                     event_id=event.id,
+                    resume_existing=relevant_case is not None,
+                    affected_meter_ids=affected_ids,
                     meter_id=command.meter_id,
                     anomaly_type=selected_event.anomaly_type,
                     severity=selected_event.severity,
@@ -1311,6 +1385,14 @@ class InvestigationService:
                 ),
                 RecordInvestigationOutput,
             )
+            run.case_id = recorded.case_id
+            plan = update_plan(
+                self.session, case_id=recorded.case_id, report_id=recorded.report_id,
+                event_id=event.id, run_id=run.id, evidence_ids=recorded.evidence_ids,
+            )
+            plan_changed = relevant_case is not None and plan.source_run_id == run.id
+            current_workflow = previous_workflows[-1] if previous_workflows else None
+            needs_recommendation = relevant_case is None or plan_changed or current_workflow is None
             proposed_action = (
                 "transformer_inspection"
                 if shared.incident_type == "shared"
@@ -1321,36 +1403,106 @@ class InvestigationService:
                 if triage.band in {"P1", "P2"}
                 else "medium" if triage.band == "P3" else "low"
             )
-            proposal = self._required(
-                "propose_action_for_approval",
-                ProposeActionInput(
-                    run_id=run.id,
-                    case_id=recorded.case_id,
-                    target_case_id=recorded.case_id,
-                    source_report_id=recorded.report_id,
-                    action_type=proposed_action,
-                    rationale=(
-                        "Shared-meter evidence warrants a simulated transformer inspection."
-                        if shared.incident_type == "shared"
-                        else "The isolated anomaly warrants a simulated technician inspection."
+            if needs_recommendation:
+                proposal = self._required(
+                    "propose_action_for_approval",
+                    ProposeActionInput(
+                        run_id=run.id,
+                        case_id=recorded.case_id,
+                        target_case_id=recorded.case_id,
+                        source_report_id=recorded.report_id,
+                        plan_id=plan.id,
+                        action_type=proposed_action,
+                        rationale=(
+                            "Shared-meter evidence warrants a simulated transformer inspection."
+                            if shared.incident_type == "shared"
+                            else "The isolated anomaly warrants a simulated technician inspection."
+                        ),
+                        risk=proposal_risk,
+                        requires_approval=True,
                     ),
-                    risk=proposal_risk,
-                    requires_approval=True,
-                ),
-                ProposeActionOutput,
-            )
-            run.case_id = recorded.case_id
+                    ProposeActionOutput,
+                )
+                final_report_id = proposal.report_id
+                recommendation_id = proposal.recommendation_id
+                action_id = proposal.action_id
+                approval_status = "pending"
+                if plan_changed:
+                    now = datetime.now(UTC)
+                    for old_recommendation, old_action in previous_workflows:
+                        old_action.status = "superseded"
+                        old_recommendation.status = "superseded"
+                        old_recommendation.superseded_by_id = proposal.recommendation_id
+                        old_recommendation.superseded_at = now
+                        self.session.add(models.CaseEvent(
+                            case_id=recorded.case_id,
+                            event_type="recommendation_superseded",
+                            created_at=now,
+                            details_json={
+                                "message": "New evidence changed the recommended next step.",
+                                "old_recommendation_id": str(old_recommendation.id),
+                                "new_recommendation_id": str(proposal.recommendation_id),
+                                "old_plan_id": (
+                                    str(old_recommendation.plan_id)
+                                    if old_recommendation.plan_id else None
+                                ),
+                                "new_plan_id": str(plan.id),
+                                "source_event_id": str(event.id),
+                                "source_report_id": str(recorded.report_id),
+                            },
+                        ))
+            else:
+                assert current_workflow is not None
+                recommendation, action = current_workflow
+                report = self.session.get(models.InvestigationReport, recorded.report_id)
+                if report is None:
+                    raise InvestigationFailure("The refreshed investigation report is missing")
+                if previous_report is not None:
+                    carried = {
+                        item.get("question_id"): item
+                        for item in previous_report.answers_json
+                        if isinstance(item, dict) and item.get("question_id") in {13, 14}
+                    }
+                    answers = [
+                        item for item in report.answers_json
+                        if not isinstance(item, dict) or item.get("question_id") not in carried
+                    ]
+                    answers.extend(carried.values())
+                    report.answers_json = sorted(
+                        answers,
+                        key=lambda item: item.get("question_id", 999)
+                        if isinstance(item, dict) else 999,
+                    )
+                if previous_case_status is not None:
+                    relevant_case.status = previous_case_status
+                    report.status = previous_case_status
+                final_report_id = report.id
+                recommendation_id = recommendation.id
+                action_id = action.id
+                approval_status = recommendation.status
+            tool_calls = int(self.session.scalar(
+                select(func.count())
+                .select_from(models.ToolExecution)
+                .where(models.ToolExecution.run_id == run.id)
+            ) or 0)
             run.status = "succeeded"
             run.ended_at = datetime.now(UTC)
+            result_status = "case_updated" if relevant_case else "case_created"
             run.state_json = {
                 "stage": "investigation_recorded",
+                "result_status": result_status,
+                "anomaly_count": len(anomaly.events),
                 "case_id": str(recorded.case_id),
-                "report_id": str(proposal.report_id),
+                "report_id": str(final_report_id),
                 "incident_type": shared.incident_type,
-                "recommendation_id": str(proposal.recommendation_id),
-                "action_id": str(proposal.action_id),
-                "approval_status": "pending",
-                "completed_tools": 21,
+                "recommendation_id": str(recommendation_id),
+                "action_id": str(action_id),
+                "approval_status": approval_status,
+                "resumed": relevant_case is not None,
+                "plan_id": str(plan.id),
+                "plan_version": plan.version,
+                "plan_changed": plan_changed,
+                "completed_tools": tool_calls,
             }
             event.status = "completed"
             self.session.flush()
@@ -1358,10 +1510,10 @@ class InvestigationService:
                 event_id=event.id,
                 run_id=run.id,
                 case_id=recorded.case_id,
-                report_id=proposal.report_id,
-                status="case_created",
+                report_id=final_report_id,
+                status=result_status,
                 anomaly_count=len(anomaly.events),
-                tool_calls=21,
+                tool_calls=tool_calls,
             )
         except Exception as exc:
             run.status = "failed"
@@ -1370,6 +1522,58 @@ class InvestigationService:
             event.status = "failed"
             self.session.flush()
             raise
+
+    def _relevant_case(
+        self, command: ReplayCommand, anomaly_type: str, affected_ids: list[str]
+    ) -> models.Case | None:
+        """Resume only an unambiguous active incident with recent matching evidence.
+
+        Exact meter matches win. Transformer matches require an affected linked meter,
+        the same anomaly type, and evidence in the preceding two hours. Wall-clock
+        case creation times cannot be used for replayed historical readings.
+        """
+        event_time = command.event_time.astimezone(UTC)
+        meter = self.session.get(models.Meter, command.meter_id)
+        candidates: dict[UUID, tuple[models.Case, bool]] = {}
+        rows = self.session.execute(
+            select(models.Case, models.CaseMeter.meter_id, models.Meter.transformer_id)
+            .join(models.CaseMeter, models.CaseMeter.case_id == models.Case.id)
+            .join(models.Meter, models.Meter.id == models.CaseMeter.meter_id)
+            .where(models.Case.status.in_([
+                "investigating", "awaiting_approval", "action_ready", "monitoring", "reopened",
+            ]))
+        )
+        for case, linked_meter, transformer_id in rows:
+            exact = linked_meter == command.meter_id
+            related = (
+                meter is not None and meter.transformer_id is not None
+                and meter.transformer_id == transformer_id and linked_meter in affected_ids
+            )
+            if not exact and not related:
+                continue
+            # Match the anomaly belonging to this case's actual trigger, not any
+            # unrelated anomaly that happens to exist for the same meter.
+            for run in self.session.scalars(select(models.AgentRun).where(
+                models.AgentRun.case_id == case.id, models.AgentRun.status == "succeeded",
+            )):
+                trigger_id = run.trigger.get("event_id")
+                if not trigger_id:
+                    continue
+                recent = self.session.scalar(select(models.Anomaly.id).where(
+                    models.Anomaly.event_id == UUID(trigger_id),
+                    models.Anomaly.type == anomaly_type,
+                    models.Anomaly.detected_at >= event_time - timedelta(hours=2),
+                    models.Anomaly.detected_at <= event_time,
+                ))
+                if recent is not None:
+                    candidates[case.id] = (case, exact or candidates.get(case.id, (None, False))[1])
+                    break
+        exact_cases = [case for case, exact in candidates.values() if exact]
+        if len(exact_cases) == 1:
+            return exact_cases[0]
+        if not exact_cases and len(candidates) == 1:
+            return next(iter(candidates.values()))[0]
+        return None
 
     def _energy_balance_input(
         self,

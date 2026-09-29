@@ -1,8 +1,25 @@
 # MeterDetective AI
 
+## Scenario 2 and reading-triggered investigations
+
+Scenario 2 now supports separate reset, normal, initial-anomaly, and shared-evidence
+replay stages. New readings are stored as events and automatically checked; abnormal
+follow-up readings resume a relevant active case and preserve investigation history.
+The general `POST /api/replay/readings` endpoint uses the same flow for existing meters.
+
+See [Day 1 reading-event instructions](docs/day1b_reading_events.md) for exact requests,
+expected results, matching policy, and failure behavior. This increment implements
+Developer B tasks 1–10, including persistent plan versions, recommendation lineage,
+revised reports, and idempotent redelivery. See
+[Plan versions and workflow history](docs/day1b_plan_versions.md). Rebuild/restart
+the API to apply the latest migration.
+
 ## Case workspace
 
-Open `http://localhost:8000/` after starting the API to use the case queue and detail pages.
+Open `http://localhost:8000/` after starting the API. The default **Live Operations**
+screen runs Scenario 2 as a guided reading stream and presents activity, evidence,
+changing explanations, plan history, and approval controls in plain language. The
+case queue remains available from the sidebar.
 The dashboard is served by FastAPI with no frontend build or external CDN dependencies.
 The operational queue refreshes every ten seconds while visible; search, filters, and sort
 apply across investigated cases. Imported records without an investigation report are kept
