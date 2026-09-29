@@ -1,10 +1,10 @@
 .git
 .github
-.venv
-.uv-cache-check
+.venv*
+.uv-*
 __pycache__
 .pytest_cache
-.pytest-tmp
+.pytest-*
 .ruff_cache
 .coverage
 .env

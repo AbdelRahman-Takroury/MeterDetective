@@ -4,9 +4,19 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>MeterDetective · Case workspace</title>
-  <link rel="stylesheet" href="/static/styles.css?v=20260929">
-  <link rel="stylesheet" href="/static/live.css?v=20260929-2">
-  <script src="/static/app.js?v=20260929-2" defer></script>
+  <script>
+    (() => {
+      let theme;
+      try { theme = localStorage.getItem("meterdetective-theme"); } catch {}
+      if (theme !== "light" && theme !== "dark") {
+        theme = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+      }
+      document.documentElement.dataset.theme = theme;
+    })();
+  </script>
+  <link rel="stylesheet" href="/static/styles.css?v=20260929-5">
+  <link rel="stylesheet" href="/static/live.css?v=20260929-5">
+  <script src="/static/app.js?v=20260929-5" defer></script>
 </head>
 <body>
   <a class="skip" href="#main">Skip to main content</a>
@@ -15,10 +25,11 @@
     <p class="eyebrow">OPERATIONS WORKSPACE</p>
     <a class="nav" id="nav-live" href="#/live"><span aria-hidden="true">◉</span> <span>Live Operations</span></a>
     <a class="nav" id="nav-cases" href="#/cases"><span aria-hidden="true">▤</span> <span>Case queue</span></a>
+    <a class="nav" id="nav-status" href="#/status"><span aria-hidden="true">✓</span> <span>System status</span></a>
     <div class="sidebar-foot"><span class="dot"></span> Simulation environment<p>Evidence-led meter investigations</p></div>
   </aside>
   <div class="workspace">
-    <header><span>Operations <span class="muted" id="breadcrumb">/ Live monitoring</span></span><span class="environment">SIMULATION ONLY</span></header>
+    <header><span>Operations <span class="muted" id="breadcrumb">/ Live monitoring</span></span><div class="header-actions"><button class="theme-toggle" id="theme-toggle" type="button" aria-pressed="false"><span aria-hidden="true">☾</span><span>Dark mode</span></button><span class="environment">SIMULATION ONLY</span></div></header>
     <main id="main" tabindex="-1"></main>
     <footer>MeterDetective AI <span>All times displayed in UTC · Energy in kWh · Currency in JOD</span></footer>
   </div>
