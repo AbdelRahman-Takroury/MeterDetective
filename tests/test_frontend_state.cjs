@@ -5,23 +5,30 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const path = require('node:path');
 const source = fs.readFileSync(path.join(__dirname, '../frontend/app.js'), 'utf8');
+const indexSource = fs.readFileSync(path.join(__dirname, '../frontend/index.html'), 'utf8');
+const stylesSource = fs.readFileSync(path.join(__dirname, '../frontend/styles.css'), 'utf8');
 
 function harness() {
   const nodes = new Map();
+  const saved = new Map();
+  const media = {matches:false,listener:null,addEventListener(_event,callback){this.listener=callback;}};
   const node = id => {
     if (!nodes.has(id)) nodes.set(id, {innerHTML:'', textContent:'', className:'',
-      disabled:false, dataset:{}, style:{}, matches(){return false;}, setAttribute(){},
+      disabled:false, dataset:{}, style:{}, attributes:{}, matches(){return false;},
+      setAttribute(name,value){this.attributes[name]=String(value);},
+      addEventListener(event,callback){if(event==='click')this.onclick=callback;},
       classList:{toggle(){}}, querySelectorAll(){return [];},
       querySelector(selector){return selector==='form'||selector.includes('input,textarea')?null:node(id + '-child');}, focus(){}});
     return nodes.get(id);
   };
-  const context = vm.createContext({document:{getElementById:node},
+  const context = vm.createContext({document:{getElementById:node,documentElement:{dataset:{}}},
     location:{hash:'#/live'}, sessionStorage:{getItem(){return null;},setItem(){},removeItem(){}},
-    setTimeout(){return 1;}, clearTimeout(){}, console, window:{},
+    localStorage:{getItem:key=>saved.get(key)??null,setItem:(key,value)=>saved.set(key,value),removeItem:key=>saved.delete(key)},
+    setTimeout(){return 1;}, clearTimeout(){}, console, window:{matchMedia:()=>media},
     fetch:async () => {throw Error('unexpected request');}});
   // Only bootstrap attaches browser listeners. Exercise the actual production functions.
   vm.runInContext(source.slice(0,source.indexOf('document.querySelector(".skip")')), context);
-  return {context, node, run:code=>vm.runInContext(code,context), set:(name,value)=>context[name]=value};
+  return {context, node, saved, media, run:code=>vm.runInContext(code,context), set:(name,value)=>context[name]=value};
 }
 function detail({decision=null, actionStatus='pending_approval', status='awaiting_approval', result=null}={}) {
   return {case:{id:'case-1',status},meter_ids:['M1'],evidence:[],hypotheses:[],plans:[],
@@ -42,6 +49,96 @@ test('startup and restored-case loading never claim no investigation',()=>{
   assert.ok(h.run('liveSummary(null).flat().every(value=>!value.includes("No investigation"))'));
   h.run('live.phase="complete";live.caseId="persisted-id"');
   assert.equal(h.run('investigationPresence()'),'Loading investigation…');
+});
+
+test('system status renders safe component states and refresh control',()=>{
+  const h=harness();h.set('data',{checked_at:'2026-09-29T10:00:00Z',
+    application:{status:'ready',detail:'Responding.',critical:true},
+    database:{status:'connected',detail:'History is stored.',critical:true},
+    demonstration_dataset:{status:'missing',detail:'Prepare scenarios.',critical:true,count:3},
+    knowledge_base:{status:'ready',detail:'Documents stored.',count:3},
+    weather:{status:'cached',detail:'Using safe cached evidence.',observed_at:'2026-09-29T09:00:00Z'},
+    narrative_service:{status:'disabled',detail:'Optional service is off.'},
+    latest_investigation:{status:'failed',detail:'Review stored activity.'}});
+  h.run('renderStatus(data)');const html=h.node('main').innerHTML;
+  assert.match(html,/System status/);assert.match(html,/Simulation environment/);
+  assert.match(html,/Using safe cached evidence/);assert.match(html,/Optional service is off/);
+  assert.match(html,/3 items recorded/);assert.match(html,/Required for the demonstration workflow/);
+  assert.equal(h.run('typeof document.getElementById("refresh-status").onclick'),'function');
+});
+
+test('theme follows the system until the operator chooses and persists an override',()=>{
+  const h=harness();h.media.matches=true;h.run('initializeTheme()');
+  assert.equal(h.context.document.documentElement.dataset.theme,'dark');
+  assert.equal(h.node('theme-toggle').attributes['aria-pressed'],'true');
+  assert.equal(h.node('theme-toggle').attributes['aria-label'],'Use light mode');
+  h.node('theme-toggle').onclick();
+  assert.equal(h.context.document.documentElement.dataset.theme,'light');
+  assert.equal(h.saved.get('meterdetective-theme'),'light');
+  h.media.listener({matches:true});
+  assert.equal(h.context.document.documentElement.dataset.theme,'light');
+});
+
+test('theme responds to system changes when no explicit preference is stored',()=>{
+  const h=harness();h.run('initializeTheme()');
+  assert.equal(h.context.document.documentElement.dataset.theme,'light');
+  h.media.listener({matches:true});
+  assert.equal(h.context.document.documentElement.dataset.theme,'dark');
+  assert.equal(h.saved.has('meterdetective-theme'),false);
+});
+
+test('theme still applies when browser storage is unavailable',()=>{
+  const h=harness();h.context.localStorage.getItem=()=>{throw Error('blocked')};
+  h.context.localStorage.setItem=()=>{throw Error('blocked')};
+  assert.equal(h.run('applyTheme("dark",true)'),'dark');
+  assert.equal(h.context.document.documentElement.dataset.theme,'dark');
+});
+
+test('theme is selected before styles load and both palettes use semantic tokens',()=>{
+  const bootstrap=indexSource.indexOf('meterdetective-theme');
+  const stylesheet=indexSource.indexOf('rel="stylesheet"');
+  assert.ok(bootstrap>0&&bootstrap<stylesheet);
+  assert.match(indexSource,/id="theme-toggle"[^>]+aria-pressed="false"/);
+  assert.match(stylesSource,/\[data-theme="dark"\]\{color-scheme:dark/);
+  for(const token of ['--surface','--warning-soft','--danger-soft','--chart-line']){
+    assert.ok(stylesSource.includes(token),`missing semantic token ${token}`);
+  }
+});
+
+test('demonstration guide is deterministic, complete, and linked to real panels',()=>{
+  const h=harness();const html=h.run('demoGuide()');
+  for(const text of ['How this demonstration works','Reading arrives','Anomaly detected',
+    'Evidence gathered','Explanations compared','Next step proposed','Operator decides',
+    'Outcome checked','Why is it agentic?','What data is synthetic?',
+    'How is uncertainty handled?','What happens when a service fails?','Simulation only:']){
+    assert.ok(html.includes(text),`missing guide copy: ${text}`);
+  }
+  for(const target of ['live-activity','live-evidence','live-hypotheses','live-recommendation']){
+    assert.ok(html.includes(`data-guide-target="${target}"`));
+  }
+  assert.ok(!html.toLowerCase().includes('chatbot'));
+});
+
+test('guide shortcuts focus their corresponding investigation section',()=>{
+  const h=harness();const target=h.node('live-evidence');let focused=false,scrolled=false;
+  target.focus=()=>{focused=true;};target.scrollIntoView=()=>{scrolled=true;};
+  assert.equal(h.run('focusGuideTarget("live-evidence")'),true);
+  assert.equal(target.attributes.tabindex,'-1');assert.equal(focused,true);assert.equal(scrolled,true);
+  h.context.document.getElementById=id=>id==='missing'?null:h.node(id);
+  assert.equal(h.run('focusGuideTarget("missing")'),false);
+});
+
+test('status route shows loading, renders success, and has a retryable failure',async()=>{
+  const h=harness();h.context.location.hash='#/status';
+  const data={checked_at:'2026-09-29T10:00:00Z',application:{status:'ready',detail:'Ready'},
+    database:{status:'connected',detail:'Connected'},demonstration_dataset:{status:'ready',detail:'Ready'},
+    knowledge_base:{status:'ready',detail:'Ready'},weather:{status:'not_checked',detail:'Not checked'},
+    narrative_service:{status:'disabled',detail:'Disabled'},latest_investigation:{status:'not_checked',detail:'None'}};
+  h.set('fetch',async()=>({ok:true,json:async()=>data}));await h.run('route()');
+  assert.match(h.node('main').innerHTML,/System status/);
+  h.set('fetch',async()=>({ok:false,status:503,json:async()=>({detail:'Status service unavailable'})}));
+  await h.run('route()');assert.match(h.node('main').innerHTML,/Status service unavailable/);
+  assert.equal(h.run('typeof document.getElementById("retry-status").onclick'),'function');
 });
 
 for (const [config,title,pending] of [
